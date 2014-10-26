@@ -1,0 +1,9 @@
+[
+	{ "name": "andy", "email": "dingsor@example.com" },
+	{ "name": "bruno", "email": "bruno@example.com" },
+	{ "name": "didier", "email": "didier@example.com" },
+ 	{ "name": "olivier", "email": "olivier@example.com" },
+	{ "name": "out-of-service", "email": "" },
+	{ "name": "test-robot", "email": "" },
+	{ "name": "update-robot", "email": "" }
+]

@@ -1,0 +1,10 @@
+{	"contextroot":"tmca",
+	"listenport":7890, 
+	"servertime": {
+		"url": "http://<your-favorite-time-widget>",
+		"frameborder": "0",
+		"width": "172",
+		"height": "18"
+	},
+	"expiry":3600000
+}

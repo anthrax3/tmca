@@ -1,0 +1,4 @@
+[
+	{"name":"vboxlocal", "classname":"localvboxhypervisor"},
+	{"name":"openstack", "classname":"openstackhypervisor"}
+]

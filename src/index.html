@@ -1,0 +1,602 @@
+<!--  
+Copyright IBM Corp. 2013
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html>
+	<head>
+		<title>TMCA</title>
+
+		<!-- style>
+			.hidden { display: none; }
+ 			.unhidden { display: block; }
+		</style -->
+
+		<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+
+		<script>
+			console.log("Entry.");
+
+			//The server will modify these variables dynamically as the HTML is served.
+			var contextroot = "$$$CONTEXT_ROOT$$$" + "/";
+			var version = '$$$VERSION$$$';
+
+			//Startup as not logged in.
+			var username = undefined;
+
+			//List of devices.
+			var currentDeviceList = undefined;
+
+			//-------------------
+			// Utility methods
+			//-------------------
+
+			var getRequest = function(url, cb) {
+				$.ajax({  
+					type: 'GET',
+					url: contextroot + url,
+					contentType: 'application/json',
+					timeout:60000,
+					success: cb,  
+					error: function(req, status, ex) {
+						console.log("getRequest: Caught error. req=" + JSON.stringify(req) + " status=" + status + " ex=" + ex);
+						alert("Error. Check console.log");
+					},  
+					timeout:60000
+				});
+			};
+
+			var postRequest = function(url, queryparms, cb) {
+				$.ajax({  
+					type: 'POST',  
+					url: contextroot + url,  
+					data: JSON.stringify(queryparms), // {key0 : value0, key1 : value1 }
+					dataType: 'text',  
+					timeout:180000,
+					processData: false,  
+					contentType: 'application/json',  
+					success: cb,
+					error: function(req, status, ex) {
+						console.log("postRequest: Caught error. req=" + JSON.stringify(req) + " status=" + status + " ex=" + ex);
+						alert("Error. Check console.log");
+					},
+					timeout:180000  
+				});  
+			};  
+
+			//-------------------
+			// Action methods
+			//-------------------
+
+			// Presents device list in an HTML table.
+			var showHtmlTable = function(deviceList) {
+				console.log("showHtmlTable. Entry.");
+				if (0 < deviceList.length) {
+					var newHtml = 
+					'<table border="1" cellpadding="4">' +
+						"<tr>" +
+							'<th colspan="6">Machines</th>' +
+							'<th colspan="3">Leases</th>' +
+							'<th>Hypervisor</th>' +
+							'<th colspan="5">Remote Access</th>' +
+						"</tr>" +
+						"<tr>" +
+							"<th>name</th>" +
+							"<th>type</th>" +
+							"<th>os</th>" +
+							"<th>distro</th>" +
+							"<th>bits</th>" +
+							"<th>contents</th>" +
+							"<th>available</th>" +
+							"<th>lessor</th>" +
+							//"<th>expiry</th>" +
+							"<th>action</th>" +
+							"<th>controls</th>" +
+							"<th>IP</th>" +
+							"<th>username</th>" +
+							"<th>password</th>" +
+							"<th>admin</th>" +
+							"<th>password</th>" +
+						"</tr>";
+					for (var i=0; i<deviceList.length; i++) {
+						var device = deviceList[i];
+
+						//var expiry = device['expiry'];
+						//if ('false' == device['available']) {
+						//	expiry = ((device['expiry'] - (new Date()).getTime()) / 1000).toFixed();
+						//}
+
+						// Do not display empty cells in HTML table. They look bad in firefox.
+						console.log('hackette');
+						console.log('device[contents]=' + device['contents']);
+						var contents = (("" == device['contents']) ? "." : device['contents']);
+						console.log('contents: ' + contents);
+
+						newHtml += 
+							"<tr>" + 
+								"<td>" + device['name'] + "</td>" + 
+								"<td>" + device['machinetype'] + "</td>" + 
+								"<td>" + device['os'] + "</td>" + 
+								"<td>" + device['distro'] + "</td>" + 
+								"<td>" + device['bits'] + "</td>" + 
+								"<td>" + contents + "</td>" + 
+								"<td>" + device['available'] + "</td>"; 
+
+						if ('n/a' == device['lessor']) {
+							newHtml += "<td>" + device['lessor'] + "</td>";
+						}
+						else {
+							newHtml += '<td style="color:blue"><b>' + device['lessor'] + "</b></td>";
+						}
+
+						// newHtml +=
+								//"<td>" + expiry + "</td>";
+
+						// Buttons: lease, unlease, or nothing
+						if ('true' == device['available']) {
+							newHtml += 
+								"<td><button onclick=\"leaseDeviceByName('" + device['name'] + "')\">Lease</button></td>";
+						}
+						else if (username == device['lessor']) {
+							newHtml += 
+								"<td><button onclick=\"unleaseDeviceByName('" + device['name'] + "')\">Unlease</button></td>";
+						}
+						else {
+							newHtml += "<td>.</td>";
+						}
+
+						// VM Buttons
+						if ('virtual' == device['machinetype']) {
+							if (username == device['lessor']) {
+								newHtml += 
+									"<td>" +
+										"<button onclick=\"getVMStatus('" + device['name'] + "')\">Status</button>" +
+										"<button style=\"background-color:yellow\" onclick=\"restoreVM('" + device['name'] + "')\">Restore</button>" +
+										"<button onclick=\"startVM('" + device['name'] + "')\">Start</button>" +
+										"<button onclick=\"stopVM('" + device['name'] + "')\">Stop</button>";
+								if ('update-robot' == username) {
+									newHtml += 
+										"<button onclick=\"updateSnapshot('" + device['name'] + "')\">UpdateSnapshot</button>";
+								}
+								newHtml += 
+									" </td>"; 
+							}
+							else {
+								newHtml += 
+									"<td>" +
+										"<button onclick=\"getVMStatus('" + device['name'] + "')\">Status</button>" +
+									" </td>"; 
+							}
+						}
+						else {
+							newHtml += "<td>.</td>";
+						}
+
+						// Remote access: IP
+						if (username == device['lessor']) {
+							newHtml +=
+									"<td>" +
+										"<button onclick=\"getIP('" + device['name'] + "')\">IP</button>" +
+									" </td>"; 
+						}
+						else {
+							newHtml += "<td>.</td>";
+						}
+
+
+						// Remote access: users & passwords (the server-side filters these values).
+						newHtml +=
+								"<td>" + device['username'] + "</td>" + 
+								"<td>" + device['password'] + "</td>" + 
+								"<td>" + device['adminname'] + "</td>" + 
+								"<td>" + device['adminpswd'] + "</td>";
+
+						newHtml += "</tr>";
+					}
+					newHtml += "</table>";
+
+					document.getElementById('deviceList').innerHTML = newHtml;
+				}
+				else {
+					document.getElementById('deviceList').innerHTML = ".";
+				}
+
+				console.log("showHtmlTable. Exit.");
+			};
+
+			// Button handler: Get VM status for a device.
+			var getVMStatus = function(devicename) {
+				console.log("getVMStatus: Entry. devicename=" + devicename);
+
+				var url = "getVMStatus/" + devicename;
+
+				getRequest(url, function(responseList, textStatus, jqXHR) {
+					console.log("showAllDevicesCallback: Entry. Received response from server. responseList.length=" + responseList.length);
+					if (1 != responseList.length) {
+						var msg = "Error. Expected 1 response object. Actual responseList.length=" + responseList.length;
+						console.log(msg);
+						alert(msg);
+						return;
+					}
+					var response = responseList[0];
+					console.log("response: " + JSON.stringify(response));
+					var vmstatus = response['vmstatus'];
+					var name = response['name'];
+					var msg = 'VM ' + name + ' is ' + vmstatus + '.';
+					var activity = response['activity'];
+					if (activity) {
+						msg += '\n\nLast activity:\n' + activity;
+					}
+					console.log(msg); 
+					alert(msg);
+
+					console.log("showAllDevicesCallback: Exit.");
+				});
+				console.log("getVMStatus: Exit.");
+			};
+
+			// Button handler: Get IP address for a device.
+			var getIP = function(devicename) {
+				console.log("getIP: Entry. devicename=" + devicename);
+
+				var url = "getIP/" + devicename;
+
+				getRequest(url, function(responseList, textStatus, jqXHR) {
+					console.log("getIPCallback: Entry. Received response from server. responseList.length=" + responseList.length);
+					if (1 != responseList.length) {
+						var msg = "Error. Expected 1 response object. Actual responseList.length=" + responseList.length;
+						console.log(msg);
+						alert(msg);
+						return;
+					}
+					var response = responseList[0];
+					console.log("response: " + JSON.stringify(response));
+					var name = response['name'];
+					var ip = response['ip'];
+					var msg = 'name: ' + name + '\nIP: ' + ip;
+					console.log(msg); 
+					alert(msg);
+
+					console.log("getIPCallback: Exit.");
+				});
+				console.log("getIP: Exit.");
+			};
+
+
+			// Button handler: Show status of all devices.
+			var showAllDevices = function() {
+				console.log("showAllDevices: Entry.");
+
+				var url = "getAllDevices/" + username;
+
+				getRequest(url, function(deviceList, textStatus, jqXHR) {
+					console.log("getVMStatusCallback: Entry. Received response from server. deviceList.length=" + deviceList.length);
+					for (var i=0; i<deviceList.length; i++) {
+						console.log("getVMStatusCallback: device[" + i + "]: " + JSON.stringify(deviceList[i]));
+					}
+
+					showHtmlTable(deviceList);
+					
+					currentDeviceList = deviceList;
+
+					console.log("getVMStatusCallback: Exit.");
+
+				});
+				console.log("showAllDevices: Exit.");
+			};
+
+			// Callback function used by leaseDeviceByOS() and leaseDeviceByName().
+			var leaseDeviceCallback = function(deviceString, textStatus, jqXHR) {
+				console.log("leaseDeviceCallback. Entry.");
+				console.log("leaseDeviceCallback: Received response from server. deviceString.length=" + deviceString.length);
+				console.log("leaseDeviceCallback: deviceString=" + JSON.stringify(deviceString));
+				console.log("leaseDeviceCallback: textStatus=" + textStatus);
+				console.log("leaseDeviceCallback: jqXHR=" + JSON.stringify(jqXHR));
+
+				// Strip off the leading '[' and trailing ']'
+				if ('[' == deviceString[0] &&
+				    ']' == deviceString[deviceString.length - 1]) {
+					console.log("leaseDeviceCallback: Stripping leading '[' and trailing ']'.");
+					deviceString = deviceString.substring(1,deviceString.length - 1);
+				}
+
+				if (0 < deviceString.length) {
+					console.log("leaseDeviceCallback: Parsing response.");
+					var deviceObj = JSON.parse(deviceString);
+					console.log("leaseDeviceCallback: deviceObject=" + JSON.stringify(deviceObj));
+					var rc = "0";
+					var msg = "";
+					for (var key in deviceObj) {
+						console.log("leaseDeviceCallback: Leased device: " + key + " : " + deviceObj[key]);
+						if ("rc" == key) rc = deviceObj[key];
+						if ("msg" == key) msg = deviceObj[key];
+					}
+					if ("0" == rc) {
+						alert("Leased device.\nClick 'refresh' to update table.");
+					}
+					else {
+						var msg = "Error: Device is not available to lease. " + msg;
+						console.log(msg);
+						alert(msg);
+					}
+				}
+				else {
+					var msg = "Error: Device is not available to lease.";
+					console.log(msg);
+					alert(msg);
+				}
+
+				console.log("leaseDeviceCallback: Exit.");
+			};
+
+			// Button handler: Lease a device by OS name
+			var leaseDeviceByOS = function(osName) {
+				console.log("leaseDeviceByOS: Entry. osName=" + osName + " username=" + username);
+
+				if (osName == undefined || 2 > osName.length) {
+					var msg = "leaseDeviceByOS: User error:  osName is not valid. osName=" + osName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (username == undefined || 2 > username.length) {
+					var msg = "leaseDeviceByOS: User error:  username is not valid. username=" + username;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var url = "leaseDeviceByOS";
+
+				var queryparms = { "os" : osName, "lessor" : username };
+
+				postRequest(url, queryparms, leaseDeviceCallback);
+
+				console.log("leaseDeviceByOS: Exit.");
+			};
+
+			// Button handler: Lease a device by device name
+			var leaseDeviceByName = function(deviceName) {
+				console.log("leaseDeviceByName: Entry. deviceName=" + deviceName + " username=" + username);
+
+				if (deviceName == undefined || 2 > deviceName.length) {
+					var msg = "leaseDeviceByName: User error:  deviceName is not valid. deviceName=" + deviceName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (username == undefined || 2 > username.length) {
+					var msg = "leaseDeviceByName: User error:  username is not valid. username=" + username;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var url = "leaseDeviceByName";
+
+				var queryparms = { "name" : deviceName, "lessor" : username };
+
+				postRequest(url, queryparms, leaseDeviceCallback);
+
+				console.log("leaseDeviceByName: Exit.");
+			};
+
+			// Button handler: Unlease a device
+			var unleaseDeviceByName = function(deviceName) {
+				console.log("unleaseDeviceByName: Entry. deviceName=" + deviceName);
+
+				if (deviceName == undefined || 2 > deviceName.length) {
+					var msg = "unleaseDeviceByName: User error:  deviceName is not valid. deviceName=" + deviceName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var url = "unleaseDeviceByName";
+
+				var queryparms = { "name" : deviceName, "lessor": username };
+
+				postRequest(url, queryparms, function(responseString, textStatus, jqXHR) {
+					console.log("unleaseDeviceByNameCallback. Entry.");
+					console.log("unleaseDeviceByNameCallback: Received response from server. responseString.length=" + responseString.length);
+					console.log("unleaseDeviceByNameCallback: responseString=" + JSON.stringify(responseString));
+					console.log("unleaseDeviceByNameCallback: textStatus=" + textStatus);
+					console.log("unleaseDeviceByNameCallback: jqXHR=" + JSON.stringify(jqXHR));
+
+					// Strip off the leading '[' and trailing ']'
+					if ('[' == responseString[0] &&
+					    ']' == responseString[responseString.length - 1]) {
+						console.log("unleaseDeviceByNameCallback: Stripping leading '[' and trailing ']'.");
+						responseString = responseString.substring(1,responseString.length - 1);
+					}
+
+					var response = JSON.parse(responseString);
+					var msg = response['msg'];
+					var rc = response['rc'];
+					console.log("unleaseDeviceByNameCallback: response: rc=" + rc + " msg=" + msg);
+					alert(msg);
+
+				});
+				console.log("unleaseDevice: Exit.");
+			};
+
+
+			// Callback function used by restoreVM, startVM, and stopVM via controlVM().
+			var controlVMCallback = function(responseString, textStatus, jqXHR) {
+				console.log("controlVMCallback. Entry.");
+				console.log("controlVMCallback: Received response from server. responseString.length=" + responseString.length);
+				console.log("controlVMCallback: responseString=" + JSON.stringify(responseString));
+				console.log("controlVMCallback: textStatus=" + textStatus);
+				console.log("controlVMCallback: jqXHR=" + JSON.stringify(jqXHR));
+
+				// Strip off the leading '[' and trailing ']'
+				if ('[' == responseString[0] &&
+				    ']' == responseString[responseString.length - 1]) {
+					console.log("controlVMCallback: Stripping leading '[' and trailing ']'.");
+					responseString = responseString.substring(1,responseString.length - 1);
+				}
+
+				var response = JSON.parse(responseString);
+				var name = response['name'];
+				var action = response['action'];
+				var msg = response['msg'];
+				var rc = response['rc'];
+				console.log("response: name=" + name + " action=" + action + " rc=" + rc + " msg=" + msg);
+				alert(msg);
+
+				console.log("controlVMCallback: Exit.");
+			};
+
+
+			// Helper method: Issues requests to control VM operation
+			var controlVM = function(deviceName, action) {
+				console.log("controlVM: Entry. deviceName=" + deviceName + " username=" + username + " action=" + action);
+
+				if ('restoreVM' != action && 'startVM' != action && 'stopVM' != action && 
+					'updateSnapshot' != action) {
+					var msg = "controlVM: User error:  action is not valid. action=" + action + ". Must be restoreVM, startVM, stopVM, takeSnapshot, or renameSnapshot";
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (deviceName == undefined || 2 > deviceName.length) {
+					var msg = "controlVM: User error:  deviceName is not valid. deviceName=" + deviceName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (username == undefined || 2 > username.length) {
+					var msg = "controlVM: User error:  username is not valid. username=" + username;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+   				if (!currentDeviceList) {
+					var msg = 'controlVM: Error: Current device list is not available. Please refresh device list. currentDeviceList: ' + currentDeviceList;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				//Verify user owns device.
+				var found = false;
+				for (var i=0; i<currentDeviceList.length; i++) {
+					var device = currentDeviceList[i];
+					if (deviceName == device['name'] &&
+						username == device['lessor']) {
+						found = true;
+						break;
+					}
+				}
+				if (!found) {
+					var msg = 'controlVM: Error: User does not own device. user=' + username + ' device=' + deviceName + '. Please lease the device and try again';
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var queryparms = { "name" : deviceName, "lessor" : username };
+
+				postRequest(action, queryparms, controlVMCallback);
+
+				console.log("controlVM: Exit.");
+			};
+
+			// Button handler: Restores a VM from master snapshot.
+			var restoreVM = function(deviceName) {
+				controlVM(deviceName, 'restoreVM');
+			};
+
+
+			// Button handler: Starts a VM.
+			var startVM = function(deviceName) {
+				controlVM(deviceName, 'startVM');
+			};
+
+
+			// Button handler: Stops a VM.
+			var stopVM = function(deviceName) {
+				controlVM(deviceName, 'stopVM');
+			};
+
+
+			// Button handler: Updates existing master snapshot
+			var updateSnapshot = function(deviceName) {
+				controlVM(deviceName, 'updateSnapshot');
+			};
+
+
+			// Constants to control div presentation.
+			var STYLE_DISPLAY_HIDDEN = "none";
+			var STYLE_DISPLAY_VISIBLE = "";
+
+			// Login.
+			var login = function() {
+				var m = "login";
+				var loginList = document.getElementById("loginList");
+				username = loginList.options[loginList.selectedIndex].text;
+				if ('' == username) {
+					username = undefined;
+					document.getElementById('pDiv').style.display = STYLE_DISPLAY_HIDDEN;
+					console.log('Signed out.');
+				}
+				else {
+					document.getElementById('pDiv').style.display = STYLE_DISPLAY_VISIBLE;
+					console.log("Signed in as: " + username);
+				}
+			}
+
+			// Startup.
+			window.onload = function() {
+				username = undefined;
+				console.log("window.onload().");
+				document.getElementById('pDiv').style.display = STYLE_DISPLAY_HIDDEN;
+				document.getElementById('versionDiv').innerHTML = 'Version: ' + version + ',   <a href="' + contextroot + '/log">Log</a>';
+			}
+
+		</script>
+
+	</head>
+
+	<body>
+
+		<h1>Test Machine Control Application (TMCA)</h1>
+		<h3>Note:  Beta testing VMs on OpenStack.</h3>
+		Beware: Some operations may take up to 3 minutes (eg, start, unlease). Andy is investigating...<br>
+
+		<form name="loginForm">Please sign in:
+			<select id="loginList" onchange="login()">$$$USERS$$$</select>
+		</form>
+		<div id="pDiv">
+
+			<b>Show All Devices:</b>
+			<button onclick="showAllDevices()">Refresh</button>
+			<br>
+			<p>
+
+			<!-- The chart showing all devices goes in this div. -->
+			<div id="deviceList"></div>
+			<br>
+
+
+		</div>
+		$$$TIME_URL$$$
+		<br><p>
+		<b>Security Warning:</b> Power off all VMs when not in use. Do NOT leave VMs powered on overnight.
+		<br><p>
+		Copyright (c) 2013, All rights reserved.
+		<br>
+		<div id="versionDiv"></div>
+		<br>
+	</body>
+</html>
