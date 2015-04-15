@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 /**
- * This class is a faux interface for hypervisor classes in TMCA.
- * 
- * It represents the actions which can be performed on a hypervisor
+ * This class provides the connection to an OpenStack hypervisor.
+ *
+ * This class implements the faux interface for hypervisor classes, ihypervisor.js
  * 
  * AD 2013-1108-0930
  */

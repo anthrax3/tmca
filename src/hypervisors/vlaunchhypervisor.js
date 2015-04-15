@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 /**
- * This class is a faux interface for hypervisor classes in TMCA.
- * 
- * It represents the actions which can be performed on a hypervisor
+ * This class provides the connection to a vLaunch hypervisor.
+ *
+ * This class implements the faux interface for hypervisor classes, ihypervisor.js
  * 
  * All callbacks returns (err, responseObject) 
  *    where responseObject contains int rc, boolean running, and string msg.  

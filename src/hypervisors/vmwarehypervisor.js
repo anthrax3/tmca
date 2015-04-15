@@ -15,7 +15,9 @@ limitations under the License.
 */
 
 /**
- * This class implements the connection to a VMWare vSphere instance.
+ * This class provides the connection to an VMWare vSphere hypervisor.
+ *
+ * This class implements the faux interface for hypervisor classes, ihypervisor.js
  *
  * Prereqs:
  *

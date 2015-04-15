@@ -16,6 +16,8 @@ limitations under the License.
 
 /**
  * This class implements the connection to a VirtualBox hypervisor.
+ *
+ * This class implements the faux interface for hypervisor classes, ihypervisor.js
  * 
  * The VirtualBox hypervisor must be installed on the local machine
  * and is accessed via vboxmanage commands.
