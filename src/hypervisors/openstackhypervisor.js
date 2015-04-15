@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2015
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -23,23 +23,33 @@ limitations under the License.
  */
 var Tr = require('./../tr.js');
 var Opstx = require('./opstx.js');
+var UniqueString = require('./../uniquestring.js');
 var	proc = require('child_process');
 var fs = require('fs');
 var util = require('util');
+var KitchenSync = require('./../kitchensync.js');
 
+var floatSync = new KitchenSync("floatSync");
 
-var OpenStackHypervisor = function() {
+var OpenStackHypervisor = function(blob) {
 
-    var name = "openstackhypervisor.js";
+	var hypervisor = blob.hypervisor;
+    var name = hypervisor.name;
+	var domain = hypervisor.domain;
 	var tr = new Tr(name, 5, "log.txt");
 	var opstx = new Opstx();
+
+	/**
+	 * Init: Instantiate an object to return unique strings, used for tmp file names.
+	 */
+	var uniqueString = new UniqueString();
 
 	/**
 	 * Constants
 	 */
 	var OPSTX_PYTHON_FILENAME = "hypervisors/opstx.py";
-	var OS_FLAVOR = "m1.medium";
-	var OS_KEY_NAME = "dingsor";
+	var OS_FLAVOR_DEFAULT = "m1.medium";
+	var OS_KEY_NAME = "";   // AD 2014-0130 Not used. No need to push SSH credentials into the VMs.
 
 
 	/**
@@ -60,9 +70,69 @@ var OpenStackHypervisor = function() {
 */
 
 	/**
+	 * Private: Helper function returns the openstack flavor for the device.
+	 */
+	var prvGetFlavor = function(blob) {
+		var m = "prvGetFlavor";
+		// Check for a 'device' object inside the blob.
+		var key = 'device';
+		if (blob.hasOwnProperty(key)) {
+			var device = blob[key];
+			// Check for a flavor inside the device.
+			key = 'openstack-flavor';
+			if (device.hasOwnProperty(key)) {
+				var flavor = device[key];
+				tr.log(5,m,"Exit. Returning specified flavor: " + flavor);
+				return flavor;
+			}
+		}
+		tr.log(5,m,"Exit. Returning default flavor: " + OS_FLAVOR_DEFAULT);
+		return OS_FLAVOR_DEFAULT;
+	}
+
+
+	/**
+	 * Private: Wait for VM status to become active then associate floating IP.
+	 * NOTE: Long wait and associate are locked in the python.
+	 */
+	var prvWaitActiveAndAssociate = function(vmname, callback) {
+		var m = "prvWaitActiveAndAssociate";
+		tr.log(5,m,"Entry. vmname=" + vmname);
+
+		// Serialize waiting for active and associating floating IP together
+		floatSync.enter(function() {
+			// Associate floating IP with the VM instance.
+			var cmd = "python " + OPSTX_PYTHON_FILENAME + " associate " + vmname;
+			tr.log(5,m,"Running cmd: " + cmd);
+			proc.exec(cmd, function (err, stdout, stderr) {
+				var m = 'associateCallback';
+				tr.log(5,m,"Entry. err=" + err);
+				tr.log(5,m,stdout);
+				if (err) {
+					var msg = "ERROR. Error associating IP to VM " + vmname;
+					tr.log(5,m,msg);
+	
+					// recovery: terminate
+					tr.log(5,m,"Attempting to terminate VM " + vmname + ". Ignoring all errors.");
+					var ignoreErrors = true;
+					prvTerminate(vmname, ignoreErrors, function(err,rspObj) {
+						floatSync.exit();
+						// ignore callback response; return prior error message.
+						return callback(msg);
+					});
+				}
+				var msg = "Associated IP with VM " + vmname;
+				tr.log(5,m,msg);
+				floatSync.exit();
+				return callback(null,{"rc": 0, "msg": msg });
+			});
+		});
+	}
+
+	/**
 	 * Private: Launch a VM and associate a floating IP with it.
 	 */
-	var prvLaunch = function(vmname, snapshotname, callback) {
+	var prvLaunch = function(vmname, snapshotname, blob, callback) {
 		var m = "prvLaunch";
 		tr.log(5,m,"Entry. vmname=" + vmname + " snapshotname=" + snapshotname);
 
@@ -73,8 +143,11 @@ var OpenStackHypervisor = function() {
 			return callback(err);
 		}
 
+		// Get the flavor
+		var flavor = prvGetFlavor(blob);
+
 		// boot VM
-		opstx.bootVM(vmname, OS_FLAVOR, snapshotname, OS_KEY_NAME, function(err, rspObj) {
+		opstx.bootVM(vmname, flavor, snapshotname, OS_KEY_NAME, function(err, rspObj) {
 			var m = "bootCallback";
 			if (err) return callback(err);
 			if (0 != rspObj.rc) return callback(null,rspObj);
@@ -85,30 +158,98 @@ var OpenStackHypervisor = function() {
 				clearInterval(intervalId);
 				var m = "sleepCallback";
 
-				// associate IP
-				var cmd = "python " + OPSTX_PYTHON_FILENAME + " associate " + vmname;
-				tr.log(5,m,"Running cmd: " + cmd);
-				proc.exec(cmd, function (err, stdout, stderr) {
-					var m = 'associateCallback';
-					tr.log(5,m,"Entry. err=" + err);
-					tr.log(5,m,stdout);
-					if (err) {
-						var msg = "ERROR. Error associating IP to VM " + vmname;
-						tr.log(5,m,msg);
+				if (true) {
+					// Wait for VM to be active.
+					var timeStop = new Date().getTime() + 360000; // 6 mins
+					var desiredState = "ACTIVE";
+					var returnOnError = "true";
+					prvWaitForState(vmname, desiredState, timeStop, returnOnError, function(err,rspObj) {
+						var m = "prvWaitForStateActiveCallback";
+						tr.log(5,m,"Entry. err=" + util.inspect(err));
+						tr.log(5,m,"rspObj: " + util.inspect(rspObj));
+						if (err || null == rspObj || 0 != rspObj.rc || desiredState != rspObj.state) {
+							var msg = "ERROR waiting for VM to become active. vmname=" + vmname + " state=" + rspObj.state + " Please check status again manually.";
+							tr.log(5,m,msg);
 
-						// recovery: terminate
-						tr.log(5,m,"Attempting to terminate VM " + vmname + ". Ignoring all errors.");
-						var ignoreErrors = true;
-						prvTerminate(vmname, ignoreErrors, function(err,rspObj) {
-							// ignore callback response; return prior error message.
+							// Future: This is problematic. Low priority feature to debug and re-enable.
+							// recovery: terminate
+							//tr.log(5,m,"Attempting to terminate VM " + vmname + ". Ignoring all errors.");
+							//var ignoreErrors = true;
+							//prvTerminate(vmname, ignoreErrors, function(err,rspObj) {
+							//	// ignore callback response; return prior error message.
+							//	return callback(msg);
+							//});
+
 							return callback(msg);
+						}
+						tr.log(5,m,"Ok. VM " + vmname + " state is " + rspObj.state + ".");
+
+						// Associate floating IP with VM.  (Note: The python also ensures that the VM is active.)
+						prvWaitActiveAndAssociate(vmname, callback);
+					});
+
+				}
+				else if (false) {
+					// Serialize waiting for active and associating floating IP individually
+					prvWaitActiveAndAssociate(vmname, callback);
+				}
+				else if (false) {
+					// Serialize waiting for active and associating floating IP together
+					floatSync.enter(function() {
+						// Associate floating IP with the VM instance.
+						var cmd = "python " + OPSTX_PYTHON_FILENAME + " associate " + vmname;
+						tr.log(5,m,"Running cmd: " + cmd);
+						proc.exec(cmd, function (err, stdout, stderr) {
+							var m = 'associateCallback';
+							tr.log(5,m,"Entry. err=" + err);
+							tr.log(5,m,stdout);
+							if (err) {
+								var msg = "ERROR. Error associating IP to VM " + vmname;
+								tr.log(5,m,msg);
+	
+								// recovery: terminate
+								tr.log(5,m,"Attempting to terminate VM " + vmname + ". Ignoring all errors.");
+								var ignoreErrors = true;
+								prvTerminate(vmname, ignoreErrors, function(err,rspObj) {
+									floatSync.exit();
+									// ignore callback response; return prior error message.
+									return callback(msg);
+								});
+							}
+							var msg = "Associated IP with VM " + vmname;
+							tr.log(5,m,msg);
+							floatSync.exit();
+							return callback(null,{"rc": 0, "msg": msg });
 						});
-					}
-					var msg = "Associated IP with VM " + vmname;
-					tr.log(5,m,msg);
-					return callback(null,{"rc": 0, "msg": msg });
-				});
-			}, 3456);
+					});
+				}
+				else {
+					// This operation is performed asynchronously, inline with incoming web requests.
+					// associate IP
+					var cmd = "python " + OPSTX_PYTHON_FILENAME + " associate " + vmname;
+					tr.log(5,m,"Running cmd: " + cmd);
+					proc.exec(cmd, function (err, stdout, stderr) {
+						var m = 'associateCallback';
+						tr.log(5,m,"Entry. err=" + err);
+						tr.log(5,m,stdout);
+						if (err) {
+							var msg = "ERROR. Error associating IP to VM " + vmname;
+							tr.log(5,m,msg);
+
+							// recovery: terminate
+							tr.log(5,m,"Attempting to terminate VM " + vmname + ". Ignoring all errors.");
+							var ignoreErrors = true;
+							prvTerminate(vmname, ignoreErrors, function(err,rspObj) {
+								// ignore callback response; return prior error message.
+								return callback(msg);
+							});
+						}
+						var msg = "Associated IP with VM " + vmname;
+						tr.log(5,m,msg);
+						return callback(null,{"rc": 0, "msg": msg });
+					});
+				}
+			}, 6789);
 		});
 
 		tr.log(5,m,"Exit.");
@@ -138,13 +279,15 @@ var OpenStackHypervisor = function() {
 			tr.log(5,m,stdout);
 			tr.log(5,m,"Entry.");
 			if (err) {
-				if (ignoreErrors) {
+				// AD 2014-0207: this old logic was backwards!
+				// New logic:  Always ignore errors here and proceed to terminate
+				if (false) { // ignoreErrors) {
 					var msg = "ERROR deassociating IP from VM " + vmname + " err: " + util.inspect(err);
 					tr.log(5,m,msg);
 					return callback(err);
 				} 
 				else {
-					var msg = "WARNING: Error deassociating IP from VM " + vmname + " err: " + util.inspect(err);
+					var msg = "WARNING: Ignoring error deassociating IP from VM " + vmname + " err: " + util.inspect(err);
 					tr.log(5,m,msg);
 				}
 			}
@@ -158,7 +301,9 @@ var OpenStackHypervisor = function() {
 				if (0 != rspObj.rc) return callback(null,rspObj);
 				
 				// Wait
-				prvWaitForState(vmname, "NON_EXISTENT", 15678, function(err,rspObj) {
+				var timeStop = new Date().getTime() + 34567;
+				var returnOnError = "false";
+				prvWaitForState(vmname, "NON_EXISTENT", timeStop, returnOnError, function(err,rspObj) {
 					var m = "prvWaitForStateCallback";
 					tr.log(5,m,"Entry. err=" + util.inspect(err));
 					if (err) return callback(err);
@@ -178,51 +323,56 @@ var OpenStackHypervisor = function() {
 
 	/**
 	 * Private:  Wait for desired VM state.
+	 * Note: This function uses setTimeout and RECURSION!!!
 	 */
-	var prvWaitForState = function(vmname, desiredState, timeoutMs, callback) {
+	var prvWaitForState = function(vmname, desiredState, timeStop, returnOnError, callback) {
 		var m = "prvWaitForState";
-		tr.log(5,m,"Entry. vmname=" + vmname + " desiredState=" + desiredState + " timeoutMs=" + timeoutMs);
+		tr.log(5,m,"Entry. vmname=" + vmname + " desiredState=" + desiredState + " timeStop=" + timeStop + " returnOnError=" + returnOnError);
 
-		var timeStop = new Date().getTime() + timeoutMs;
+		// get state
+		// Note: this function returns 'BUILD' and 'ERROR' as well as 'ACTIVE' and 'PAUSED'.
+		opstx.getDetailedVMState(vmname, function(err, rspObj) {
+			var m = "prvWaitForStateCallback";
+			var timeRemainingSec = (timeStop - (new Date().getTime())) / 1000;
+			tr.log(5,m,"Entry. timeRemainingSec=" + timeRemainingSec + " err: ", err);
+			if (err) return callback(err);
+			tr.log(5,m,"rspObj: " + util.inspect(rspObj));
+			if (0 != rspObj.rc) return callback(null,rspObj);
 
-		var intervalId = setInterval( function() {
-			var m = 'prvWaitForStateCallback: ';
+			var actualState = rspObj.state;
+			tr.log(5,m,"actualState=" + actualState);
 
-			// get state
-			opstx.getVMState(vmname, function(err, rspObj) {
-				var m = "prvGetStateCallback";
-				var timeRemainingSec = (timeStop - (new Date().getTime())) / 1000;
-				tr.log(5,m,"Entry. timeRemainingSec=" + timeRemainingSec + " err: ", err);
-				if (err) return callback(err);
-				tr.log(5,m,"rspObj: " + util.inspect(rspObj));
-				if (0 != rspObj.rc) return callback(null,rspObj);
+			// compare states
+			if (desiredState == actualState) {
+				var msg = "VM states are identical. vmname=" + vmname + " Returning actualState=" + actualState + " timeRemainingSec=" + timeRemainingSec;
+				tr.log(5,m,msg);
+				return callback(null,{"rc": 0, "state": actualState, "msg": msg });
+			}
 
-				var actualState = rspObj.state;
-				tr.log(5,m,"actualState=" + actualState);
-
-				// compare states
-				if (desiredState == actualState) {
-					clearInterval(intervalId);
-					var msg = "VM states are identical. vmname=" + vmname + " Returning actualState=" + actualState + " timeRemainingSec=" + timeRemainingSec;
-					tr.log(5,m,msg);
-					return callback(null,{"rc": 0, "state": actualState, "msg": msg });
-				}
-
-				// check timeout
-				if (new Date().getTime() > timeStop) {
-					clearInterval(intervalId);
-					var msg = "Timeout expired. VM states are not identical. vmname=" + vmname + " desiredState=" + desiredState + " actualState=" + actualState + " timeRemainingSec=" + timeRemainingSec;
+			// check state ERROR
+			if ("true" == returnOnError) {
+				if ("ERROR" == actualState) {
+					var msg = "State is " + actualState;
 					tr.log(5,m,msg);
 					return callback(null,{"rc": -1, "state": actualState, "msg": msg });
 				}
+			}
 
-				// wait again
-				console.log(m + 'File does not exist. Waiting ' + timeRemainingSec + ' seconds.');
-				var msg = "Waiting again. VM states are not identical. vmname=" + vmname + " desiredState=" + desiredState + " actualState=" +  actualState + " timeRemainingSec=" + timeRemainingSec;
+			// check timeout
+			if (new Date().getTime() > timeStop) {
+				var msg = "Timeout expired. VM states are not identical. vmname=" + vmname + " desiredState=" + desiredState + " actualState=" + actualState + " timeRemainingSec=" + timeRemainingSec;
 				tr.log(5,m,msg);
-				return;
-			});
-		}, 3456);
+				return callback(null,{"rc": -1, "state": actualState, "msg": msg });
+			}
+
+			// wait again.  Call ourself RECURSIVELY!!!
+			var msg = "File does not exist. Waiting again. VM states are not identical. vmname=" + vmname + " desiredState=" + desiredState + " actualState=" +  actualState + " timeRemainingSec=" + timeRemainingSec;
+			tr.log(5,m,msg);
+			// Note: Pass in the NAME of the function, timeoutMs, followed by args for the function.
+			setTimeout( prvWaitForState, 3456, vmname, desiredState, timeStop, returnOnError, callback);
+		});
+
+		tr.log(5,m,"Exit.");
 	}
 
 
@@ -231,7 +381,7 @@ var OpenStackHypervisor = function() {
 	 *
 	 * When a VM is leased using OpenStack, a new VM instance is launched.
 	 */
-	this.leaseVM = function(vmname, snapshotname, callback) {
+	this.leaseVM = function(vmname, snapshotname, blob, callback) {
 		var m = "leaseVM";
 		tr.log(5,m,"Entry. vmname=" + vmname + " snapshotname=" + snapshotname);
 
@@ -244,7 +394,7 @@ var OpenStackHypervisor = function() {
 	 *
 	 * When a VM is unleased using OpenStack, the VM is terminated.
 	 */
-	this.unleaseVM = function(vmname, callback) {
+	this.unleaseVM = function(vmname, blob, callback) {
 		var m = "unleaseVM";
 		tr.log(5,m,"Entry. vmname=" + vmname);
 
@@ -278,7 +428,15 @@ var OpenStackHypervisor = function() {
 			else {
 				var err = "ERROR: VM state not recognized. VM=" + vmname + " state=" + state;
 				tr.log(0,m,err);
-				return callback(err);
+				// AD 2014-0207-0730 - Do not return callback. Do call terminate.
+				if (false) {
+					return callback(err);
+				}
+				else {
+					tr.log(0,m,"Calling Terminate with ignoreErrors=true vmname=" + vmname + " state=" + state + " =====");
+					var ignoreErrors = true; 
+					prvTerminate(vmname, ignoreErrors, callback);
+				}
 			}
 		});
 	};
@@ -287,7 +445,7 @@ var OpenStackHypervisor = function() {
 	/**
 	 * API: Indicates whether the VM is running.
 	 */
-	this.isRunning = function(vmname, callback) {
+	this.isRunning = function(vmname, blob, callback) {
 		var m = "isRunning";
 		tr.log(5,m,"Entry. vmname=" + vmname);
 
@@ -298,7 +456,7 @@ var OpenStackHypervisor = function() {
 	/**
 	 * API: Gets the IP address of the specified VM.
 	 */
-	this.getIP = function(vmname, callback) {
+	this.getIP = function(vmname, blob, callback) {
 		var m = "getIP";
 		tr.log(5,m,"Entry. vmname=" + vmname);
 
@@ -310,7 +468,7 @@ var OpenStackHypervisor = function() {
 		}
 
 		// define python command
-		var filename = "tmp/get.ip.tmp";
+		var filename = "tmp/get.ip." + vmname + "." + uniqueString.getUniqueString();
 		var cmd = "python " + OPSTX_PYTHON_FILENAME + " displayassociated " + vmname + " > " + filename;
 		tr.log(5,m,"Running: " + cmd);
 
@@ -326,10 +484,14 @@ var OpenStackHypervisor = function() {
 				return callback(null,{"rc": 0, "ip": "", "msg": msg });
 			}
 
-			// read
+			// read the contents of the response from file.
 			var line;
 			var fileContentsString = fs.readFileSync( filename, 'utf8');
 			tr.log(5,m,"fileContentsString: >>>" + fileContentsString + "<<<");
+
+			// Delete the tmp file.
+			fs.unlinkSync(filename);
+
 			var fileContentsList = fileContentsString.split("\n");
 			tr.log(5,m,"fileContentsList.length=" + fileContentsList.length);
 			for (var i=0; i<fileContentsList.length; i++) {
@@ -374,7 +536,7 @@ var OpenStackHypervisor = function() {
 	 * When a VM is restored using OpenStack,
 	 * the old VM is terminated, and a new VM is launched.
 	 */
-	this.restoreVM = function(vmname, snapshotname, callback) {
+	this.restoreVM = function(vmname, snapshotname, blob, callback) {
 		var m = "restoreVM";
 		tr.log(5,m,"Entry. vmname=" + vmname + " snapshotname=" + snapshotname);
 
@@ -419,9 +581,11 @@ var OpenStackHypervisor = function() {
 	 *
 	 * When a VM is started using OpenStack, the VM is unpaused.
 	 */
-	this.startVM = function(vmname, snapshotname, callback) {
+	this.startVM = function(vmname, snapshotname, blob, callback) {
 		var m = "startVM";
 		tr.log(5,m,"Entry. vmname=" + vmname + " snapshotname=" + snapshotname);
+		tr.log(5,m,"blob: " + util.inspect(blob));
+
 
 		// get state
 		opstx.getVMState(vmname, function(err, rspObj) {
@@ -446,7 +610,7 @@ var OpenStackHypervisor = function() {
 			}
 			else if ("NON_EXISTENT" == state) {
 				tr.log(5,m,"Launching new VM " + vmname + " snapshotname=" + snapshotname);
-				prvLaunch(vmname, snapshotname, callback);
+				prvLaunch(vmname, snapshotname, blob, callback);
 			}
 			else {
 				var err = "ERROR: VM state not recognized. VM=" + vmname + " state=" + state;
@@ -462,7 +626,7 @@ var OpenStackHypervisor = function() {
 	 *
 	 * When a VM is stopped using OpenStack, the VM is paused.
 	 */
-	this.stopVM = function(vmname, callback) {
+	this.stopVM = function(vmname, blob, callback) {
 		var m = "stopVM";
 		tr.log(5,m,"Entry. vmname=" + vmname);
 
@@ -480,7 +644,27 @@ var OpenStackHypervisor = function() {
 			// handle states
 			if ("ACTIVE" == state) {
 				tr.log(5,m,"VM " + vmname + " is active. Pausing.");
-				opstx.pauseVM(vmname, callback);
+				opstx.pauseVM(vmname, function(err,rspObj) {
+					if (err) return callback(err);
+
+					// Wait for VM to be paused.
+					var timeStop = new Date().getTime() + 60000; // 1 min
+					var desiredState = "PAUSED";
+					var returnOnError = "false";
+					prvWaitForState(vmname, desiredState, timeStop, returnOnError, function(err,rspObj) {
+						var m = "prvWaitForStatePausedCallback";
+						tr.log(5,m,"Entry. err=" + util.inspect(err));
+						tr.log(5,m,"rspObj: " + util.inspect(rspObj));
+						if (err || null == rspObj || 0 != rspObj.rc || desiredState != rspObj.state) {
+							var msg = "ERROR. Timeout expired waiting for VM to stop. vmname=" + vmname + " Please check status again manually.";
+							tr.log(5,m,msg);
+							return callback(msg);
+						}
+						var msg = "Ok. VM " + vmname + " state is " + rspObj.state + ".";
+						tr.log(5,m,msg);
+						return callback(null,{"rc": 0, "msg": msg });
+					});
+				});
 			}
 			else {
 				var msg = "VM " + vmname + " is not active.";
@@ -494,7 +678,7 @@ var OpenStackHypervisor = function() {
 	/**
 	 * API: Takes snapshot.
 	 */
-	this.takeSnapshot = function(vmname, snapshotname, callback) {
+	this.takeSnapshot = function(vmname, snapshotname, blob, callback) {
 		var m = "takeSnapshot";
 		tr.log(5,m,"Entry. vmname=" + vmname + " snapshotname=" + snapshotname);
 
@@ -505,7 +689,7 @@ var OpenStackHypervisor = function() {
 	/**
 	 * API: Renames snapshot.
 	 */
-	this.renameSnapshot = function(vmname, srcsnapshotname, dstsnapshotname, callback) {
+	this.renameSnapshot = function(vmname, srcsnapshotname, dstsnapshotname, blob, callback) {
 		var m = "renameSnapshot";
 		tr.log(5,m,"Entry. vmname=" + vmname + " srcsnapshotname=" + srcsnapshotname + " dstsnapshotname=" + dstsnapshotname);
 

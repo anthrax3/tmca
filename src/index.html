@@ -1,5 +1,5 @@
 <!--  
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2014
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@ limitations under the License.
 -->
 <html>
 	<head>
-		<title>TMCA</title>
+		<title>$$$TITLE$$$</title>
 
 		<!-- style>
 			.hidden { display: none; }
@@ -62,7 +62,7 @@ limitations under the License.
 					url: contextroot + url,  
 					data: JSON.stringify(queryparms), // {key0 : value0, key1 : value1 }
 					dataType: 'text',  
-					timeout:180000,
+					timeout:300000,
 					processData: false,  
 					contentType: 'application/json',  
 					success: cb,
@@ -70,7 +70,7 @@ limitations under the License.
 						console.log("postRequest: Caught error. req=" + JSON.stringify(req) + " status=" + status + " ex=" + ex);
 						alert("Error. Check console.log");
 					},
-					timeout:180000  
+					timeout:300000  
 				});  
 			};  
 
@@ -85,9 +85,9 @@ limitations under the License.
 					var newHtml = 
 					'<table border="1" cellpadding="4">' +
 						"<tr>" +
-							'<th colspan="6">Machines</th>' +
-							'<th colspan="3">Leases</th>' +
-							'<th>Hypervisor</th>' +
+							'<th colspan="7">Machines</th>' +
+							'<th colspan="4">Leases</th>' +
+							'<th colspan="3">Hypervisor</th>' +
 							'<th colspan="5">Remote Access</th>' +
 						"</tr>" +
 						"<tr>" +
@@ -97,11 +97,15 @@ limitations under the License.
 							"<th>distro</th>" +
 							"<th>bits</th>" +
 							"<th>contents</th>" +
+							"<th>owner</th>" +
 							"<th>available</th>" +
-							"<th>lessor</th>" +
+							"<th>permitted</th>" +
+							"<th>lessee</th>" +
 							//"<th>expiry</th>" +
 							"<th>action</th>" +
+							"<th>name</th>" +
 							"<th>controls</th>" +
+							"<th>snapshot</th>" +
 							"<th>IP</th>" +
 							"<th>username</th>" +
 							"<th>password</th>" +
@@ -122,6 +126,20 @@ limitations under the License.
 						var contents = (("" == device['contents']) ? "." : device['contents']);
 						console.log('contents: ' + contents);
 
+						if (undefined == device['permittedusers']) {
+							permittedusers = ".";
+						}
+						else {
+							permittedusers = device['permittedusers'];
+						}
+
+						if (undefined == device['owner']) {
+							owner = ".";
+						}
+						else {
+							owner = device['owner'];
+						}
+
 						newHtml += 
 							"<tr>" + 
 								"<td>" + device['name'] + "</td>" + 
@@ -130,7 +148,9 @@ limitations under the License.
 								"<td>" + device['distro'] + "</td>" + 
 								"<td>" + device['bits'] + "</td>" + 
 								"<td>" + contents + "</td>" + 
-								"<td>" + device['available'] + "</td>"; 
+								"<td>" + owner + "</td>" +
+								"<td>" + device['available'] + "</td>" +
+								"<td>" + permittedusers + "</td>";
 
 						if ('n/a' == device['lessor']) {
 							newHtml += "<td>" + device['lessor'] + "</td>";
@@ -157,6 +177,7 @@ limitations under the License.
 
 						// VM Buttons
 						if ('virtual' == device['machinetype']) {
+							newHtml += "<td>" + device['hypervisor'] + "</td>";
 							if (username == device['lessor']) {
 								newHtml += 
 									"<td>" +
@@ -176,6 +197,28 @@ limitations under the License.
 									"<td>" +
 										"<button onclick=\"getVMStatus('" + device['name'] + "')\">Status</button>" +
 									" </td>"; 
+							}
+						}
+						else {
+							newHtml += "<td>.</td>";
+							newHtml += "<td>.</td>";
+						}
+
+						// Snapshot
+						if ('virtual' == device['machinetype']) {
+
+							if ((username == device['owner']) && (username == device['lessor'])) {
+								//console.log("===snapName=== device[name]=" + device['name'] + " device[snapshot]=" + device['snapshot']);
+								newHtml +=
+									"<td>" + 
+										"<form method=post onsubmit=\"setSnapshotName('" + device['name'] + "'); return false;\" >" +
+											"<input id=new_snapshot_name_" + device['name'] + "  type=text  value=\"" + device['snapshot'] + "\" >" + 
+											"<input type=submit value=Set >" + 
+										"</form>" + 
+									"</td>";
+							}
+							else {
+								newHtml += "<td>" + device['snapshot'] + "</td>";
 							}
 						}
 						else {
@@ -464,7 +507,7 @@ limitations under the License.
 
 				if ('restoreVM' != action && 'startVM' != action && 'stopVM' != action && 
 					'updateSnapshot' != action) {
-					var msg = "controlVM: User error:  action is not valid. action=" + action + ". Must be restoreVM, startVM, stopVM, takeSnapshot, or renameSnapshot";
+					var msg = "controlVM: User error:  action is not valid. action=" + action + ". Must be restoreVM, startVM, stopVM, or updateSnapshot.";
 					console.log(msg);
 					alert(msg);
 					return;
@@ -488,7 +531,7 @@ limitations under the License.
 					return;
 				}
 
-				//Verify user owns device.
+				//Verify user is leasing the device.
 				var found = false;
 				for (var i=0; i<currentDeviceList.length; i++) {
 					var device = currentDeviceList[i];
@@ -499,7 +542,7 @@ limitations under the License.
 					}
 				}
 				if (!found) {
-					var msg = 'controlVM: Error: User does not own device. user=' + username + ' device=' + deviceName + '. Please lease the device and try again';
+					var msg = 'controlVM: Error: User is not leasing the device. user=' + username + ' device=' + deviceName + '. Please lease the device and try again';
 					console.log(msg);
 					alert(msg);
 					return;
@@ -536,6 +579,46 @@ limitations under the License.
 			};
 
 
+			// Button handler: Sets the name of the master snapshot
+			var setSnapshotName = function(deviceName) {
+				var new_snapshot_name = document.getElementById('new_snapshot_name_' + deviceName).value;
+				var info = "deviceName=" + deviceName + " username=" + username + " new_snapshot_name=" + new_snapshot_name;
+				console.log("setSnapshotName: " + info);
+
+				if (deviceName == undefined || 2 > deviceName.length) {
+					var msg = "setSnapshotName: User error: deviceName is not valid. deviceName=" + deviceName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (username == undefined || 2 > username.length) {
+					var msg = "setSnapshotName: User error: username is not valid. username=" + username;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				/*
+				if (-1 != new_snapshot_name.indexOf(" ")) {
+					var msg = "setSnapshotName: User error: Snapshot name may not include spaces. new_snapshot_name=>>>" + new_snapshot_name + "<<<";
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				*/
+
+				if (32 < new_snapshot_name.length) {
+					var msg = "setSnapshotName: User error: Snapshot name is more than 32 characters. new_snapshot_name=" + new_snapshot_name + "<<<";
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var queryparms = { "devicename" : deviceName, "snapshotname" : new_snapshot_name, "lessor" : username };
+				postRequest('setSnapshotName', queryparms, controlVMCallback);
+			};
+
+
 			// Constants to control div presentation.
 			var STYLE_DISPLAY_HIDDEN = "none";
 			var STYLE_DISPLAY_VISIBLE = "";
@@ -561,7 +644,7 @@ limitations under the License.
 				username = undefined;
 				console.log("window.onload().");
 				document.getElementById('pDiv').style.display = STYLE_DISPLAY_HIDDEN;
-				document.getElementById('versionDiv').innerHTML = 'Version: ' + version + ',   <a href="' + contextroot + '/log">Log</a>';
+				document.getElementById('versionDiv').innerHTML = 'Version: ' + version + ',   <a href="' + contextroot + 'log/3072">Log</a>';
 			}
 
 		</script>
@@ -570,9 +653,7 @@ limitations under the License.
 
 	<body>
 
-		<h1>Test Machine Control Application (TMCA)</h1>
-		<h3>Note:  Beta testing VMs on OpenStack.</h3>
-		Beware: Some operations may take up to 3 minutes (eg, start, unlease). Andy is investigating...<br>
+		<h1>Test Machine Control Application (TMCA) on $$$HOSTNAME$$$</h1>
 
 		<form name="loginForm">Please sign in:
 			<select id="loginList" onchange="login()">$$$USERS$$$</select>
@@ -594,7 +675,7 @@ limitations under the License.
 		<br><p>
 		<b>Security Warning:</b> Power off all VMs when not in use. Do NOT leave VMs powered on overnight.
 		<br><p>
-		Copyright (c) 2013, All rights reserved.
+		Copyright (c) 2013,2015. All rights reserved.
 		<br>
 		<div id="versionDiv"></div>
 		<br>

@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2015
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ limitations under the License.
 	All REST request and response messages are in json format.
 */
 var Tr = require('./tr.js');
+var Snapshots = require('./snapshots.js');
 var util = require('util');
 var net = require('net');
 var fs = require('fs');
@@ -40,7 +41,9 @@ var NodeMailWrapper = require('./nodemailwrapper.js');
 var nodeMailWrapper = new NodeMailWrapper();
 
 // Instantiate a verbose log (see tr.js)
-var tr = new Tr("tmca.js", 5, "log.txt");  // 5=verbose  3=medium  0=errors only
+var LOG_FILENAME = "log.txt"
+var LOG_LEVEL = 5;
+var tr = new Tr("tmca.js", LOG_LEVEL, LOG_FILENAME);  // 5=verbose  3=medium  0=errors only
 
 // Instantiate a high-level activity log.
 var activityLog = new Tr("",5,"activity.txt");
@@ -54,6 +57,16 @@ var ADMIN_USER = 'andy';
  * User name which applies operating system updates and security patches.
  */
 var UPDATE_USER = 'update-robot';
+
+/**
+ * User name which performs health checks.
+ */
+var HEALTH_USER = 'health-robot';
+
+/**
+ * User name which runs automated tests.
+ */
+var TEST_USER = 'test-robot';
 
 /**
  * Name of the default master snapshot for VMs.
@@ -70,6 +83,11 @@ var SERVER_CONFIG_FILENAME = 'server.json'
  * Name of the file which contains information about devices to be leased.
  */
 var DEVICES_FILENAME = 'devices.json'
+
+/**
+ * Name of the file which contains information about leased devices.
+ */
+var LEASES_FILENAME = 'leases.json'
 
 /**
  * Name of the file which contains information about users of this app.
@@ -236,6 +254,8 @@ function getHTML(req, res) {
 		data = data.replace("$$$VERSION$$$", thisFileMtime);
 		data = data.replace("$$$USERS$$$", getUsersHTML());
 		data = data.replace("$$$TIME_URL$$$", getServerTimeHTML());
+		data = data.replace("$$$TITLE$$$", "TMCA on " + os.hostname());
+		data = data.replace("$$$HOSTNAME$$$", os.hostname());
 
 		res.setHeader('Content-Type', 'text/html');
 		res.writeHead(200);
@@ -248,12 +268,15 @@ function getHTML(req, res) {
  * Returns contents of activity log to web browser.
  * Intended for usage analysis.
  *
- * Request:  curl "http://localhost:7890/pool/log"
+ * Request:  curl "http://localhost:7890/pool/log/12345"
+ *  where 12345 is the number of characters to be returned.
  */
 function getLog(req, res) {
 	var m = "getLog";
 	logClientRequest(req);
 	tr.log(5,m,"Entry. Returning contents of log file.");
+
+	var numchars = req.params.numchars;
 
 	if (fs.existsSync('./activity.txt')) {
 		fs.readFile(__dirname + '/activity.txt', 'UTF8', function (err, data) {
@@ -264,7 +287,18 @@ function getLog(req, res) {
 
 			res.setHeader('Content-Type', 'text/html');
 			res.writeHead(200);
-			res.end(data);
+
+			if (0 == numchars || data.length < numchars) {
+				res.end(data);
+			}
+			else {
+				// Send the last n characters, not the entire history of the world.
+				var startIndex = data.length - numchars;
+				var lessData = data.substring(startIndex, data.length);
+				var lessData = "Presenting the last " + numchars + " characters of activity.txt...<br><br>" + lessData;
+				tr.log(5,m,"data.length=" + data.length + " numchars = " + numchars + " startIndex=" + startIndex + " len(lessData)=" + lessData.length);
+				res.end(lessData);
+			}
 		});
 	}
 	else {
@@ -275,7 +309,33 @@ function getLog(req, res) {
 }
 
 /**
- * Helper returns an clone of the devices object with some fields blanked out.
+ * Returns a new javascript object identical to the supplied device.
+ * Merges the supplied lease object if provided.
+ */
+function cloneDevice(device, lease) {
+	var m = "cloneDevice";
+	//tr.log(5,m,"Entry.");
+	var rcDevice = {};
+
+	for (var key in device) {
+		if (device.hasOwnProperty(key)) {
+			rcDevice[key] = device[key];
+		}
+	}
+
+	if (lease) {
+		rcDevice['available'] = lease.available;
+		rcDevice['lessor'] = lease.lessor;
+	}
+	//tr.log(5,m,"Exit. Returning device: " + util.inspect(rcDevice));
+	//tr.log(5,m,"Exit. Returning device.");
+	return rcDevice;
+}
+
+ 
+/**
+ * Helper returns an clone of the devices object with 
+ * some fields blanked out and some fields added.
  */
 function getDevicesFiltered(lessor) {
 	var m = "getDevicesFiltered";
@@ -284,25 +344,38 @@ function getDevicesFiltered(lessor) {
 	var rcDeviceList = [];
 	for (var i=0; i<devices.length; i++) {
 		var device = devices[i];
-		var rcDevice = {};
-		tr.log(5,m,"Considering i=" + i + " name=" + device.name + " os=" + device.os + " available=" + device.available);
-		// Clone it.
-		for (var key in device) {
-			if (device.hasOwnProperty(key)) {
-				rcDevice[key] = device[key];
-			}
-		}
+		var lease = getLeaseByName(device.name);
+		/*
+		tr.log(5,m,"Considering i=" + i + 
+			" name=" + device.name +
+			" os=" + device.os + 
+			" available=" + lease.available);
+		*/
+		var rcDevice = cloneDevice(device, lease);
+
 		// Filter it.
-		if (lessor != device['lessor']) {
+		if (lessor != lease['lessor']) {
 			rcDevice['hostname'] = '.';
 			rcDevice['username'] = '.';
 			rcDevice['password'] = '.';
 			rcDevice['adminname'] = '.';
 			rcDevice['adminpswd'] = '.';
+
+			// Enable/disable the lease button for windows and MSDN license.
+			if ("windows" == device['os']) {
+				if (!userHasMSDN(lessor)) {
+					tr.log(5,m,"no msdn for windows.");
+					rcDevice['available'] = 'no_msdn';
+				}
+			}
 		}
+
+		rcDevice['snapshot'] = snapshots.getSnapshotName(device.name);
+
 		rcDeviceList.push(rcDevice);
 	}
-	tr.log(5,m,"Exit. rcDeviceList: " + JSON.stringify(rcDeviceList));
+	//tr.log(5,m,"Exit. rcDeviceList: " + JSON.stringify(rcDeviceList));
+	tr.log(5,m,"Exit. Returning rcDeviceList.");
 	return rcDeviceList;
 }
 
@@ -338,7 +411,102 @@ function getAllDevices(req, res) {
 }
 
 /**
- * Helper indicates whether the machine is a VM, leased, and owned by lessor.
+ * Lists devices which match the specified:
+ *		Contents (example: tomcat7, websphere8), 
+ *		OS (example: linux, windows), and 
+ *		architecture bits (ie, 32 or 64).
+ * and for which the user has auth to lease (eg, has windows MSDN)
+ *
+ * If found, returns all characteristics about the device(s).
+ * Otherwise, returns an empty list.
+ *
+ * Note: bits may be an empty string "" or zero "0".  These serve as wildcards.
+ *
+ * Example:
+ * Request: curl "http://tmca0.rtp.raleigh.ibm.com:7890/pool/getDevicesByContentsOSBits/tomcat/linux/64/bozo"
+ * Response:  [{ "name": "dingHTC", 
+ *               "os": "android2.3", 
+ *               "hostname": "dingp.raleigh.ibm.com", 
+ *               "available": "false", 
+ *               "lessor": "fred" }]
+ */
+function getDevicesByContentsOSBits(req, res) {
+	var m = "getDevicesByContentsOSBits";
+	logClientRequest(req);
+	tr.log(5,m,"Entry.");	
+	var rcDeviceList = [];
+
+	// Extract the desired operating system and lessor name from the request.
+	var desiredContents = req.params.contents;
+	var desiredOS = req.params.os;
+	var desiredBits = req.params.bits;
+	var lessor = req.params.lessor
+
+	tr.log(5,m,"desiredContents=" + desiredContents + " desiredOS=" + desiredOS + " desiredBits=" + desiredBits + " lessor=" + lessor);
+
+	// Search for devices.
+	found = false;
+	for (var i=0; i<devices.length; i++) {
+		var device = devices[i];
+		var lease = getLeaseByName(device.name);
+		/*
+		tr.log(5,m,"Considering i=" + i + 
+			" name=" + device.name + 
+			" contents=" + device.contents + 
+			" os=" + device.os + 
+			" bits=" + device.bits + 
+			" available=" + lease.available);
+		*/
+		if (matchContentsOsBits(device, desiredContents, desiredOS, desiredBits) &&
+			(("windows" == device['os'] && userHasMSDN(lessor)) || ("windows" != device['os']))) {
+			tr.log(5,m,"match. i=" + i + 
+				" name=" + device.name + 
+				" contents=" + device.contents + 
+				" os=" + device.os + 
+				" bits=" + device.bits + 
+				" available=" + lease.available);
+			found = true;
+
+			var rcDevice = cloneDevice(device, lease);
+			rcDevice['hostname'] = '.';
+			rcDevice['username'] = '.';
+			rcDevice['password'] = '.';
+			rcDevice['adminname'] = '.';
+			rcDevice['adminpswd'] = '.';
+
+			rcDeviceList.push(rcDevice);
+		}
+		//else {
+		//	tr.log(5,m,"no match.");
+		//}
+	}
+
+	// TODO: Standardize this response object.
+	tr.log(5,m,"Exit. Returning list: " + JSON.stringify(rcDeviceList));
+	res.send(rcDeviceList);
+}
+
+/**
+ * Indicates whether the hypervisor supports user-settable snapshot names.
+ */
+/*
+function settableSnapshots(hypervisor) {
+	var m = "settableSnapshots";
+	tr.log(5,m,"Entry. ");
+	tr.log(5,m,"hypervisor=" + util.inspect(hypervisor));
+	tr.log(5,m,"hypervisor.name=" + hypervisor.name);
+	if (hypervisor.hasOwnProperty("settable_snapshots")) {
+		tr.log(5,m,"has own property.");		
+		tr.log(5,m,"returning " + hypervisor.settable_snapshots);
+		return hypervisor.settable_snapshots;
+	}
+	tr.log(5,m,"hypervisor does not have property settable_snapshots. Returning false.");		
+	return false;
+}
+*/
+
+/**
+ * Helper indicates whether the machine is a VM, leased, and leased by lessor.
  * Returns "ready" if machine is ready.  Returns nothing if not ready.
  */
 function readyForHypervisor(name, lessor) {
@@ -357,14 +525,26 @@ function readyForHypervisor(name, lessor) {
 		return;
 	}
 	
-	// Verify the lessor owns the device.
-	if (!userOwnsDevice(name,lessor)) {
-		tr.log(5,m,"ERROR. User does not own device. name=" + name);
+	// Verify the user leases the device.
+	if (!userLeasesDevice(name,lessor)) {
+		tr.log(5,m,"ERROR. User is not lessee. name=" + name);
 		return;
 	}
 	
 	tr.log(5,m,"Exit. Device " + name + " is ready for hypervisor");
 	return "ready";
+}
+
+
+/**
+ * Returns a device object by name. Returns an empty object if not found.
+ */
+function getNonEmptyDeviceByName(name) {
+	var device = getDeviceByName(name);
+	if (null == device) {
+		device = {};
+	}
+	return device;
 }
 
 
@@ -376,7 +556,7 @@ function getDeviceByName(name) {
 	tr.log(5,m,"Entry. name=" + name + " devices.length=" + devices.length);
 	for (var i=0; i<devices.length; i++) {
 		var device = devices[i];
-		tr.log(5,m,"device[" + i + "]=" + device.name);
+		//tr.log(5,m,"device[" + i + "]=" + device.name);
 		if (name == device.name) {
 			tr.log(5,m,"Exit. Returning found device " + name);
 			return device;
@@ -388,8 +568,123 @@ function getDeviceByName(name) {
 
 
 /**
+ * Returns an object with various and sundry information which 
+ * may be required by a hypervisor.
+ */
+function getBlob(deviceName, lessor) {
+	var m = "getBlob";
+
+	var blob = {};
+	if (null != lessor) {
+		var user = getUser(lessor);
+		blob['user'] = user;
+	}
+	blob['users'] = users;
+	var device = getNonEmptyDeviceByName(deviceName);
+	blob['device'] = device;
+	if (device.hasOwnProperty("owner")) {
+		var deviceowner = getUser(device['owner']);
+		blob['deviceowner'] = deviceowner;
+	}
+	tr.log(5,m,"Exit. deviceName=" + deviceName + " lessor=" + lessor + " Returning blob.");
+	//console.log(blob);
+	return blob;
+}
+
+
+/**
+ * Returns a lease object by name. 
+ * Note:  If not found, creates a new element in the table.
+ */
+function getLeaseByName(name) {
+	var m = "getLeaseByName";
+	//tr.log(5,m,"Entry. name=" + name + " leases.length=" + leases.length);
+
+	for (var i=0; i<leases.length; i++) {
+		var lease = leases[i];
+		//tr.log(5,m,"lease[" + i + "]=" + lease.name);
+		if (name == lease.name) {
+			//tr.log(5,m,"Exit. Returning found lease: name=" + name + " available=" + lease.available);
+			return lease;
+		}
+	}
+
+	// Not found. Create new lease.
+	tr.log(5,m,"Lease " + name + " not found. Creating new entry.");
+	lease = {"name": name, "available": "true", "lessor": "n/a", "leasetimestamp": "n/a", "emailtimestamp": "n/a"};
+	leases.push(lease);
+
+	// Save to file.
+	fs.writeFileSync(LEASES_FILENAME, JSON.stringify(leases));
+
+	tr.log(5,m,"Exit. Returning new lease: " + util.inspect(lease));
+	return lease;
+}
+
+
+/**
+ * Removes the specified lease from the list.
+ */
+function removeLeaseByName(name) {
+	var m = "removeLeaseByName";
+
+	// Search for the specific device.
+	for (var i=0; i<leases.length; i++) {
+		var lease = leases[i];
+		if (name == lease.name) {
+			tr.log(5,m,"match.");
+			// Delete the lease from the list
+			leases.splice(i,1);
+			// Save to file.
+			fs.writeFileSync(LEASES_FILENAME, JSON.stringify(leases));
+			break;
+        }
+	}
+}
+
+
+/**
+ * Marks a device as leased.
+ */
+function markLeased(name, lessor) {
+	var m = "markLeased";
+	tr.log(5,m,"Entry. name=" + name + " lessor=" + lessor);
+
+	var timeNow = (new Date()).getTime();
+
+	var lease = getLeaseByName(name);
+	lease.available = "false";
+	lease.lessor = lessor;
+	lease.leasetimestamp = timeNow;
+	lease.emailtimestamp = "n/a";
+
+	// Save to file.
+	fs.writeFileSync(LEASES_FILENAME, JSON.stringify(leases));
+}
+
+
+/**
+ * Marks a device as unleased.
+ */
+function markUnleased(name) {
+	var m = "markUnleased";
+	tr.log(5,m,"Entry. name=" + name);
+
+	var lease = getLeaseByName(name);
+	lease.available = "true";
+	lease.lessor = "n/a";
+	lease.leasetimestamp = "n/a";
+	lease.emailtimestamp = "n/a";
+
+	// Save to file.
+	fs.writeFileSync(LEASES_FILENAME, JSON.stringify(leases));
+}
+
+
+/**
  * Helper function returns the snapshot name for a device from devices.json.
  */
+/* 2015-0129-1200 Deprecated by moving the snapshot information into snapshots.js
 function getSnapshotName(devicename) {
 	var m = "getSnapshotName";
 	tr.log(5,m,"Entry. devicename=" + devicename);
@@ -407,7 +702,7 @@ function getSnapshotName(devicename) {
 		return MASTER_SNAPSHOT_NAME;
 	}
 }
-
+*/
 
 /**
  * Helper function returns a hypervisor module for the specified VM.
@@ -415,26 +710,39 @@ function getSnapshotName(devicename) {
 function getHypervisor(devicename) {
 	var m = "getHypervisor";
 	tr.log(5,m,"Entry. devicename=>>>" + devicename + "<<<");
+	var hypervisor = findHypervisorForDevice(devicename);
+	if (undefined != hypervisor && null != hypervisor) {
+		tr.log(5,m,"Exit. Returning found hypervisor object. " + util.inspect(hypervisor.object));
+		return hypervisor.object;
+	}
+	tr.log(5,m,"Exit. Did not find hypervisor object.");
+}
+
+function findHypervisorForDevice(devicename) {
+	var m = "findHypervisorForDevice";
+	tr.log(5,m,"Entry. devicename=>>>" + devicename + "<<<");
 
 	var device = getDeviceByName(devicename);
 	if (!device) {
 		tr.log(5,m,"ERROR: Could not find device " + devicename);
 		return;
 	}
+	//tr.log(5,m,"Found device object: " + util.inspect(device));
 
 	var deviceHypervisor = device.hypervisor;
 	if (!deviceHypervisor) {
 		tr.log(5,m,"ERROR: Did not find device " + devicename);
+		//tr.log(5,m,"device: " + util.inspect(device));
 		return;
 	}
 
 	tr.log(5,m,"Searching for hypervisor " + deviceHypervisor + " hypervisors.length=" + hypervisors.length);
 	for (var i=0; i<hypervisors.length; i++) {
 		var hypervisor = hypervisors[i];
-		tr.log(5,m,"Considering hypervisor[" + i + "]: >>>" + hypervisor.name + "<<< vs deviceHypervisor >>>" + deviceHypervisor + "<<<");
+		////tr.log(5,m,"Considering hypervisor[" + i + "]: >>>" + hypervisor.name + "<<< vs deviceHypervisor >>>" + deviceHypervisor + "<<< " + util.inspect(hypervisor));
 		if (deviceHypervisor == hypervisor.name) {
 			tr.log(5,m,"Exit. Returning hypervisor " + hypervisor.name + " with object " + hypervisor.object);
-			return hypervisor.object;
+			return hypervisor;
 		}
 	}
 	tr.log(5,m,"ERROR. Did not find hypervisor for device " + devicename);
@@ -466,10 +774,13 @@ function getVMStatus(req, res) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, null);
+
 	// Execute command
 	tr.log(5,m,"Calling hypervisor.isRunning(" + name + ")");
 	tr.log(5,m,"getName: " + hypervisor.getName());
-	hypervisor.isRunning(name, function(err, running) {
+	hypervisor.isRunning(name, blob, function(err, running) {
 		var m = "getVMStatusCallback";
 		if (err) {
 			tr.log(5,m,err);
@@ -568,6 +879,23 @@ function sendEmail(usernameList, subject, message) {
 	}
 }
 
+
+/**
+ * Returns the object for the specified user.
+ * Returns an empty object if not found.
+ */
+function getUser(username) {
+	var not_found = {};
+	for (var i=0; i<users.length; i++) {
+		var user = users[i];
+		if (username == user.name) {
+			return user;
+		}
+	}	
+	return not_found;
+}
+
+
 /**
  * Indicates if the specified user name is a valid user.
  */
@@ -583,6 +911,34 @@ function isValidUser(username) {
 
 
 /**
+ * Indicates whether the specified user has MSDN license (ie, looks for "msdn":"true" in users.json)
+ */
+function userHasMSDN(username) {
+	for (var i=0; i<users.length; i++) {
+		var user = users[i];
+		if (username == user.name) {
+			key = "msdn";
+			if (user.hasOwnProperty(key)) {
+				msdn = user[key];
+				return ("true" == msdn);
+			}
+			return false;
+		}
+	}	
+	return false;
+}
+
+
+/**
+ * Indicates whether the specified device is known.
+ */
+function isKnownDevice(devicename) {
+	var device = getDeviceByName(devicename);
+	return (undefined != device);
+}
+	
+
+/**
  * Indicates whether the specified device is a virtual machine.
  */
 function isVirtualMachine(devicename) {
@@ -595,18 +951,20 @@ function isVirtualMachine(devicename) {
  * Indicates whether a device is leased or not.
  */
 function isAvailable(name) {
-	var device = getDeviceByName(name);
-	return (device && "true" == device.available);
+	var lease = getLeaseByName(name);
+	return (lease && "true" == lease.available);
 }
+
 
 
 /**
- * Indicates whether the user owns the device.
+ * Indicates whether the user is lessee for the device.
  */
-function userOwnsDevice(devicename, lessor) {
-	var device = getDeviceByName(devicename);
-	return (device && 'false' == device.available && lessor == device.lessor);
+function userLeasesDevice(devicename, lessor) {
+	var lease = getLeaseByName(devicename);
+	return (lease && "false" == lease.available && lessor == lease.lessor);
 }
+
 
 /**
  * Helper method leases a device.
@@ -618,33 +976,36 @@ function leaseDevice(req, device, lessor, res) {
 	// Authenticate lessor.
 	if (!isValidUser(lessor)) {
 		return sendErrorResponse(res,{},m,"ERROR. User not recognized as valid user. lessor=" + lessor);
-/*		var msg = "Exit. Error. User not recognized as valid user. lessor=" + lessor;
-		tr.log(5,m,msg);
-		var rc = {};
-		rc['rc'] = -1;
-		rc['msg'] = msg;
-		res.send([rc]);
-		return;
-*/
 	}
 
 	// Mark the device as leased.
-	device.available = 'false';
-	device.lessor = lessor;
-	//device.expiry = expiry + (new Date()).getTime();
-
-	// Save to file.
-	fs.writeFileSync(DEVICES_FILENAME, JSON.stringify(devices));
+	markLeased(device.name, lessor);
 
 	// Respond to requestor.
 	// TODO: Standardize this return object.
-	var rc = [ device ];
+	lease = getLeaseByName(device.name);
+	var rcDevice = cloneDevice(device, lease);
+	var rc = [ rcDevice ];
 	res.send(rc);
 
 	// Record activity.
 	recordActivityHelper(req, lessor, device.name, "Leased");
 
 	console.log('activity:\n' + JSON.stringify(activityCache));
+
+	// Suppress frequent emails.
+	if (UPDATE_USER == lessor) {
+		tr.log(5,m,"Exit early. Not sending email to admin user for update user.  Too much spam.");
+		return;
+	}
+	if (HEALTH_USER == lessor) {
+		tr.log(5,m,"Exit early. Not sending email for health user.  Too much spam.");
+		return;
+	}
+	if (-1 < lessor.indexOf(TEST_USER)) {
+		tr.log(5,m,"Exit early. Not sending email for user " + lessor + ". Too much spam.");
+		return;
+	}
 
 	// Send email.
 	var usernameList = ((ADMIN_USER == lessor) ? [ ADMIN_USER ] : [ ADMIN_USER, lessor ]);
@@ -679,11 +1040,15 @@ function initAndLeaseDevice(req, device, lessor, res) {
 		}
 
 		// Get the snapshot name for the VM
-		var snapshotname = getSnapshotName(name);
+		// var snapshotname = getSnapshotName(name);
+		var snapshotname = snapshots.getSnapshotName(name);
+
+		// Get miscellaneous information which may be required by the hypervisor.
+		var blob = getBlob(name, lessor);
 
 		// Initialize the VM
 		tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".leaseVM(" + name + ", " + snapshotname + ")");
-		hypervisor.leaseVM(name, snapshotname, function(err,rspObj) {
+		hypervisor.leaseVM(name, snapshotname, blob, function(err,rspObj) {
 			var m = "initAndLeaseCallback";
 			tr.log(5,m,"Entry. err=" + err);
 			if (err || 0 != rspObj.rc) {
@@ -723,12 +1088,80 @@ var list1ContainsList2 = function(stringList1, stringList2) {
 }
 
 /**
+ * Compares desired properties with actual properties.
+ */
+var matchContentsOsBits = function(device, desiredContents, desiredOS, desiredBits) {
+	return (list1ContainsList2(device.contents, desiredContents) && 
+			device.os == desiredOS && 
+			(desiredBits == "" || desiredBits == "0" || device.bits == desiredBits));
+}
+
+
+/**
+ * Indicates if a user is 'special'.
+ */
+var isUserSpecial = function(user) {
+	var m = "isUserSpecial: ";
+	tr.log(5,m,"Entry. user=" + user);
+
+	if ((ADMIN_USER == user) || (UPDATE_USER == user) || (HEALTH_USER == user) || (TEST_USER == user)) {
+		tr.log(5,m,"Exit. Returning true because user is special: " + user);
+		return true;
+	}
+	tr.log(5,m,"Exit. Returning false because user is not special: " + user);
+	return false;
+}
+
+
+/**
+ * Indicates if the lessor is permitted to lease the specified device.
+ */
+var isLeasePermitted = function(device, lessor) {
+	var m = "isLeasePermitted: ";
+	tr.log(5,m,"Entry. device.name=" + device.name + " lessor=" + lessor);
+
+	if (isUserSpecial(lessor)) {
+		tr.log(5,m,"Exit. Returning true because lessor is a privileged user: " + lessor);
+		return true;
+	}
+
+	permittedUserList = []
+	if (device.hasOwnProperty("permittedusers")) {
+		permittedUsers = device["permittedusers"]
+		permittedUserList = permittedUsers.split(",");
+	}
+	tr.log(5,m,"permittedUserList.length=" + permittedUserList.length + " list: " + util.inspect(permittedUserList));
+
+	if (0 == permittedUserList.length) {
+		tr.log(5,m,"Exit. Returning true because permittedUserList is empty.");
+		return true;
+	}
+
+	for (var i=0; i<permittedUserList.length; i++) {
+		permittedUser = permittedUserList[i];
+		if (lessor == permittedUser) {
+			tr.log(5,m,"Exit. Returning true because lessor is in permittedUserList.");
+			return true;
+		}
+		//else {
+		//	tr.log(5,m,"No match. permittedUser=" + permittedUser + " lessor=" + lessor);
+		//}
+	}
+
+	tr.log(5,m,"Exit. Returning false because permittedUserList does not contain lessor name.");
+	return false;
+}
+
+
+/**
  * Leases a device which matches the specified:
  *		Contents (example: tomcat7, websphere8), 
  *		OS (example: linux, windows), and 
  *		architecture bits (ie, 32 or 64).
  * If successful, returns all characteristics about the device.
  * Otherwise, returns an empty list.
+ *
+ * Note: bits may be an empty string "" or zero "0".  These serve as wildcards.
  *
  * Example:
  * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "contents":"tomcat", "os":"linux", "bits": 32, "lessor":"fred" }' http://localhost:7890/pool/leaseDeviceByContentsOSBits
@@ -754,26 +1187,33 @@ function leaseDeviceByContentsOSBits(req, res) {
 	found = false;
 	for (var i=0; i<devices.length; i++) {
 		var device = devices[i];
+		var lease = getLeaseByName(device.name);
+		/*
 		tr.log(5,m,"Considering i=" + i + 
 			" name=" + device.name + 
 			" contents=" + device.contents + 
 			" os=" + device.os + 
-			" bits=" + device.bits +
-			" available=" + device.available);
-		if (list1ContainsList2(device.contents, desiredContents) && 
-			device.os == desiredOS && 
-			device.bits == desiredBits &&
-			device.available == 'true') {
-			tr.log(5,m,"match.");
+			" bits=" + device.bits + 
+			" available=" + lease.available);
+		*/
+		if (matchContentsOsBits(device, desiredContents, desiredOS, desiredBits) &&
+			lease.available == 'true' &&
+			isLeasePermitted(device, lessor)) {
+			tr.log(5,m,"match. i=" + i + 
+				" name=" + device.name + 
+				" contents=" + device.contents + 
+				" os=" + device.os + 
+				" bits=" + device.bits + 
+				" available=" + lease.available);
 			found = true;
 
 			initAndLeaseDevice(req, device, lessor, res);
 
 			break;
         }
-		else {
-			tr.log(5,m,"no match.");
-		}
+		//else {
+		//	tr.log(5,m,"no match.");
+		//}
 	}
 
 	if (found) {
@@ -812,18 +1252,30 @@ function leaseDeviceByOS(req, res) {
 	// Search for an available device.
 	found = false;
 	for (var i=0; i<devices.length; i++) {
-		tr.log(5,m,"Considering i=" + i + " name=" + devices[i].name + " os=" + devices[i].os + " available=" + devices[i].available);
-		if (devices[i].os == desiredOS && devices[i].available == 'true') {
-			tr.log(5,m,"match.");
+		var device = devices[i];
+		var lease = getLeaseByName(device.name);
+		/*
+		tr.log(5,m,"Considering i=" + i + 
+			" name=" + device.name + 
+			" os=" + device.os + 
+			" available=" + lease.available);
+		*/
+		if (device.os == desiredOS && 
+			lease.available == 'true' &&
+			isLeasePermitted(device, lessor)) {
+			tr.log(5,m,"match. i=" + i + 
+				" name=" + device.name + 
+				" os=" + device.os + 
+				" available=" + lease.available);
 			found = true;
 
-			initAndLeaseDevice(req, devices[i], lessor, res);
+			initAndLeaseDevice(req, device, lessor, res);
 
 			break;
         }
-		else {
-			tr.log(5,m,"no match.");
-		}
+		//else {
+		//	tr.log(5,m,"no match.");
+		//}
 	}
 
 	if (found) {
@@ -862,18 +1314,30 @@ function leaseDeviceByName(req, res) {
 	// Search for the device.
 	found = false;
 	for (var i=0; i<devices.length; i++) {
-		tr.log(5,m,"Considering i=" + i + " name=" + devices[i].name + " os=" + devices[i].os + " available=" + devices[i].available);
-		if (devices[i].name == desiredDeviceName && devices[i].available == 'true') {
-			tr.log(5,m,"match.");
+		var device = devices[i];
+		var lease = getLeaseByName(device.name);
+		/*
+		tr.log(5,m,"Considering i=" + i + 
+			" name=" + device.name + 
+			" os=" + device.os + 
+			" available=" + lease.available);
+		*/
+		if (device.name == desiredDeviceName && 
+			lease.available == 'true' &&
+			isLeasePermitted(device, lessor)) {
+			tr.log(5,m,"Match. " + 
+				" name=" + device.name + 
+				" os=" + device.os + 
+				" available=" + lease.available);
 			found = true;
 
-			initAndLeaseDevice(req, devices[i], lessor, res);
+			initAndLeaseDevice(req, device, lessor, res);
 
 			break;
         }
-		else {
-			tr.log(5,m,"no match.");
-		}
+		//else {
+		//	tr.log(5,m,"no match.");
+		//}
 	}
 
 	if (found) {
@@ -887,6 +1351,42 @@ function leaseDeviceByName(req, res) {
 }
 
 /**
+ * FOR DEBUG ONLY
+ * Sleeps for the specified time, then returns success.
+ * Useful for debugging premature timeouts for slow operations.
+ *
+ * Example: TBD
+ * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "seconds":"123" }' http://localhost:7890/pool/slowsrv/
+ * Response:  [{ n/a }]
+ */
+function slowsrv(req, res) {
+	var m = "slowsrv";
+	logClientRequest(req);
+	tr.log(5,m,"Entry.");
+
+	// SECRET!!! Increase the socket timeout to 6 minutes (360K ms)
+	req.connection.setTimeout(6 * 60 * 1000);
+
+	// Extract the desired device name and lessor name from the request.
+	var seconds = req.body.seconds;
+	tr.log(5,m,"seconds=" + seconds);
+
+	setTimeout(function() {
+		var m = "slowsrvCallback";
+		tr.log(5,m,"Entry.");
+		var msg = "Sleep complete. seconds=" + seconds;
+		tr.log(5,m,msg);
+		rc = {};
+		rc['rc'] = 0;
+		rc['msg'] = msg;
+		res.send([rc]);
+		tr.log(5,m,"Exit.");
+	}, seconds);
+
+	tr.log(5,m,"Exit.");	
+}
+
+/**
  * Helper method unleases a device.
  */
 function unleaseDevice(req, rc, device, res) {
@@ -894,16 +1394,13 @@ function unleaseDevice(req, rc, device, res) {
 	tr.log(5,m,"Entry.");// device=" + JSON.stringify(device));	
     tr.log(5,m,"device=" + util.inspect(device));
 
+	var lease = getLeaseByName(device.name);
+
 	// Remember the lessor.
-	var lessor = device.lessor;
+	var lessor = lease.lessor;
 
 	// Mark the device as available.
-	device.available = 'true';
-	device.lessor = 'n/a';
-	//device.expiry = 'n/a';
-
-	// Save to file.
-	fs.writeFileSync(DEVICES_FILENAME, JSON.stringify(devices));
+	markUnleased(device.name);
 
 	// Respond to requestor.
 	var msg = "Unleased device ok. device=" + device.name; 
@@ -914,6 +1411,20 @@ function unleaseDevice(req, rc, device, res) {
 
 	// Record activity.
 	recordActivityHelper(req, lessor, device.name, "Unleased");
+
+	// Suppress frequent emails.
+	if (UPDATE_USER == lessor) {
+		tr.log(5,m,"Exit early. Not sending email to admin user for update user.  Too much spam.");
+		return;
+	}
+	if (HEALTH_USER == lessor) {
+		tr.log(5,m,"Exit early. Not sending email for health user.  Too much spam.");
+		return;
+	}
+	if (-1 < lessor.indexOf(TEST_USER)) {
+		tr.log(5,m,"Exit early. Not sending email for user " + lessor + ". Too much spam.");
+		return;
+	}
 
 	// Send email.
 	var usernameList = ((ADMIN_USER == lessor) ? [ ADMIN_USER ] : [ ADMIN_USER, lessor ]);
@@ -953,14 +1464,17 @@ function unleaseDeviceByName(req, res) {
 	}
     tr.log(5,m,"device=" + util.inspect(device));
 
+	// Get the lease
+	var lease = getLeaseByName(device.name);
+
 	// Verify device is leased.
-	if ('false' != device.available) {
+	if ('false' != lease.available) {
 		return sendErrorResponse(res,rc,m,"ERROR. Device is not leased. lessor=" + lessor + " name=" + name);
 	}
 
 	// Verify device is leased by lessor.
-	if (lessor != device.lessor) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own device. name=" + name);
+	if (lessor != lease.lessor) {
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 
 	// Unlease real machines.
@@ -976,9 +1490,12 @@ function unleaseDeviceByName(req, res) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
+
 	// Execute command
 	tr.log(5,m,"Calling hypervisor.isRunning(" + name + ")");
-	hypervisor.isRunning(name, function(err, running) {
+	hypervisor.isRunning(name, blob, function(err, running) {
 		var m = "unleaseDeviceByNameCallback";
 		tr.log(5,m,"Entry. err=" + err + " running=" + running);
 		if (err) {
@@ -1010,7 +1527,7 @@ function unleaseDeviceByName(req, res) {
 		if (isVirtualMachine(name)) {
 			// Uninitialize the VM
 			tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".unleaseVM(" + name + ")");
-			hypervisor.unleaseVM(name, function(err,rspObj) {
+			hypervisor.unleaseVM(name, blob, function(err,rspObj) {
 				var m = "unleaseUnleaseCallback";
 				if (err) {
 					tr.log(5,m,"WARNING. VM did not uninitialize. lessor=" + lessor + " name=" + name + " err: " + err);
@@ -1057,8 +1574,6 @@ function addDevice(req, res) {
 	newdevice.distro = req.body.distro;
 	newdevice.bits = req.body.bits;
 	newdevice.hostname = req.body.hostname;
-	newdevice.available = req.body.available;
-	newdevice.lessor = req.body.lessor;
     tr.log(5,m,"newdevice=" + util.inspect(newdevice));
 
 	// TODO: Add arg value checking here
@@ -1069,6 +1584,7 @@ function addDevice(req, res) {
 		res.send([]);
 		return;
 	}
+
 /*
 	tr.log(5,m,"devlics.length=" + devices.length);
 	for (var i=0; i<devices.length; i++) {
@@ -1108,18 +1624,30 @@ function removeDevice(req, res) {
 
 	// Search for the specific device.
 	for (var i=0; i<devices.length; i++) {
-		tr.log(5,m,"Considering i=" + i + " name=" + devices[i].name + " os=" + devices[i].os + " available=" + devices[i].available);
-		if (devices[i].name == name) {
-			tr.log(5,m,"match.");
+		var device = devices[i];
+		var lease = getLeaseByName(device.name);
+		/*
+		tr.log(5,m,"Considering i=" + i + 
+			" name=" + device.name + 
+			" os=" + device.os + 
+			" available=" + lease.available);
+		*/
+		if (device.name == name) {
+			tr.log(5,m,"Match. " +
+				" name=" + device.name + 
+				" os=" + device.os + 
+				" available=" + lease.available);
 			// Delete the device from the list
 			devices.splice(i,1);
 			// Save to file.
 			fs.writeFileSync(DEVICES_FILENAME, JSON.stringify(devices));
+
+			removeLeaseByName(device.name);
 			break;
         }
-		else {
-			tr.log(5,m,"no match.");
-		}
+		//else {
+		//	tr.log(5,m,"no match.");
+		//}
 	}
 	tr.log(5,m,"Exit.");
 	res.send([]);
@@ -1127,37 +1655,134 @@ function removeDevice(req, res) {
 
 
 /**
- * Unleases expired devices.
+ * Indicates whether a lease is expired.
+ */
+var isLeaseExpired = function(lease) {
+	var m = "isLeaseExpired: ";
+	//tr.log(5,m,"Entry. maxLeaseMs=" + maxLeaseMs + " lease=" + util.inspect(lease));
+
+	if ("false" == lease.available && "n/a" != lease.leasetimestamp) {
+		var timeNow = (new Date()).getTime();
+		if (timeNow > (lease.leasetimestamp + maxLeaseMs)) {
+			tr.log(5,m,"Exit. Returning true. Lease is EXPIRED. name=" + lease.name);
+			return true;
+		}
+	}
+
+	//tr.log(5,m,"Exit. Returning false. Lease is not expired. name=" + lease.name);
+	return false;
+}
+
+/**
+ * Constants for time calculations.
+ */
+MINUTE_MS = 60 * 1000;
+HOUR_MS = 60 * MINUTE_MS;
+HOURS_4_MS = 4 * HOUR_MS;
+HOURS_24_MS = 24 * HOUR_MS;
+
+/**
+ * Indicates whether we can send another warning email to lessee.
+ * This function limits one email per day for an expired lease.
+ */
+var canSendEmail = function(lease) {
+	var m = "canSendEmail: ";
+	//tr.log(5,m,"Entry. maxLeaseMs=" + maxLeaseMs + " lease=" + util.inspect(lease));
+	var timeNow = (new Date()).getTime();
+
+	if (isLeaseExpired(lease)) {
+		if ("n/a" == lease.emailtimestamp) {
+			tr.log(5,m,"Exit. Returning true. First email may be sent. name=" + lease.name);
+			return true;
+		}
+		else if (timeNow > (lease.emailtimestamp + HOURS_24_MS)) {
+			tr.log(5,m,"Exit. Returning true. Repeat email may be sent. name=" + lease.name);
+			return true;
+		}
+		else {
+			//tr.log(5,m,"Exit. Returning false. Repeat email may not be sent yet. name=" + lease.name);
+			return false;
+		}
+	}
+	else {
+		//tr.log(5,m,"Exit. Returning false. Lease is not expired. name=" + lease.name);
+		return false;
+	}
+}
+
+
+/**
+ * Returns a humanly-readable string indicating the approximate age of the lease.
+ */
+var getLeaseAgeString = function(lease) {
+
+	if ("false" != lease.available || "n/a" == lease.leasetimestamp) {
+		return "n/a";
+	}
+
+	var timeNow = (new Date()).getTime();
+	var leaseAgeMs = timeNow - lease.leasetimestamp;
+
+	if (leaseAgeMs > HOURS_24_MS) {
+		return "" + (Math.floor(leaseAgeMs/HOURS_24_MS)) + "+ days";
+	}
+	if (leaseAgeMs > HOUR_MS) {
+		return "" + (Math.floor(leaseAgeMs/HOUR_MS)) + "+ hours";
+	}
+	if (leaseAgeMs > MINUTE_MS) {
+		return "" + (Math.floor(leaseAgeMs/MINUTE_MS)) + "+ minutes";
+	}
+	return "" + leaseAgeMs + " ms"
+}
+
+
+/**
+ * Checks for expired leases.
 */
-/*
-var monitorExpiry = function () {
-	var m = 'monitorExpiry: ';
+var monitorLeaseDuration = function () {
+	var m = 'monitorLeaseDuration: ';
 	tr.log(5,m,'Entry');
 
-	var intervalId = setInterval( function() {
-		var m = 'monitorExpiryCallback: ';
+	// Check every 1 hour.
+	sleepMs = HOUR_MS;
 
-		var timeNow = (new Date()).getTime();
+	// Infinite loop.
+	setInterval( function() {
+		var m = 'monitorLeaseDurationCallback: ';
+		tr.log(5,m,"Entry.");
 
-		for (var i=0; i<devices.length; i++) {
-			var msg = " i=" + i + " name=" + devices[i].name + " os=" + devices[i].os + " lessor=" + devices[i].lessor;
-			if ("false" == devices[i].available && timeNow > devices[i].expiry) {
-				var msg = "Expired!  Unleasing device! " + msg;
-				tr.log(5,m,msg);
+		for (var i=0; i<leases.length; i++) {
+			var lease = leases[i];
 
-				var res = undefined;
-				var rc = { 'name': name, 'action': 'expiry' };
-				unleaseDevice(req, rc, devices[i], res);
+			var device = getDeviceByName(lease.name);
+			if (null != device && canSendEmail(lease)) {
+
+				// Send email to lessee.
+				var lessor = lease.lessor;
+				var usernameList = ((ADMIN_USER == lessor) ? [ ADMIN_USER ] : [ ADMIN_USER, lessor ]);
+				var subject = "Lease expired: " + lease.name + " " + lessor;
+				var message = "Device " + lease.name + " has been leased " + getLeaseAgeString(lease) + ".";
+				message += " Please unlease when finished.";
+				message += " Contact John Doe (johndoe@us.ibm.com) with questions.";
+				sendEmail(usernameList, subject, message);
+
+				tr.log(5,m,"Sent email to " + lessor + ": " + subject);
+
+				// Update email timestamp to limit sending emails too frequently.
+				lease.emailtimestamp = (new Date()).getTime();
+
+				// Save to file.
+				fs.writeFileSync(LEASES_FILENAME, JSON.stringify(leases));
 			}
 			else {
 				//tr.log(5,m,"ok " + msg);
 			}
 		}
-	}, 12345);
+	}, sleepMs);
 
-	tr.log(5,m,'Exit');
+	tr.log(5,m,'Exit. sleepMs=' + sleepMs);
 }
-*/
+
 
 
 /**
@@ -1201,9 +1826,9 @@ function restoreVM(req, res) {
 	var lessor = req.body.lessor;
 	tr.log(5,m,"name=" + name + " lessor=" + lessor);
 
-	// Verify the device is a VM, device is leased, and user owns the lease.
+	// Verify the device is a VM, device is leased, and user holds the lease.
 	if (!readyForHypervisor(name, lessor)) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own the VM. name=" + name);
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 
 	// Get the hypervisor for the VM
@@ -1214,11 +1839,16 @@ function restoreVM(req, res) {
 	}
 
 	// Get the snapshot name for the VM
-	var snapshotname = getSnapshotName(name);
+	// var snapshotname = getSnapshotName(name);
+	var snapshotname = snapshots.getSnapshotName(name);
+
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
 
 	// Execute command
 	tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".restoreVM(" + name + ", " + snapshotname + ")");
-	hypervisor.restoreVM(name, snapshotname, function(err) {
+	hypervisor.restoreVM(name, snapshotname, blob, function(err) {
+		var m = "restoreVMCallback";
 		if (err) {
 			tr.log(5,m,err);
 			sendErrorResponse(res,rc,m,"ERROR restoring VM " + name + " " + util.inspect(err));
@@ -1248,41 +1878,51 @@ function startVM(req, res) {
 	tr.log(5,m,"Entry.");	
 	var rc = { 'name': name, 'action': 'startVM' };
 
+	// Important for slow-starting VMs: Increase the socket timeout.
+	req.connection.setTimeout(6 * 60 * 1000);  // 6 minutes
+
 	// Extract the device name from the request.
 	var name = req.body.name
 	var lessor = req.body.lessor;
 	tr.log(5,m,"name=" + name + " lessor=" + lessor);
 
-	// Verify the device is a VM, device is leased, and user owns the lease.
+	// Verify the device is a VM, device is leased, and user holds the lease.
 	if (!readyForHypervisor(name, lessor)) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own the VM. name=" + name);
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 
 	// Get the hypervisor for the VM
 	var hypervisor = getHypervisor(name);
-	tr.log(5,m,"hypervisor=" + hypervisor);
+	tr.log(5,m,"name=" + name + " hypervisor=" + hypervisor);
 	if (!hypervisor) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
 	// Get the snapshot name for the VM
-	var snapshotname = getSnapshotName(name);
+	// var snapshotname = getSnapshotName(name);
+	var snapshotname = snapshots.getSnapshotName(name);
+
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
 
 	// Execute command
 	tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".startVM(" + name + ", " + snapshotname + ")");
-	hypervisor.startVM(name, snapshotname, function(err) {
+	hypervisor.startVM(name, snapshotname, blob, function(err) {
+		var m = "startVMCallback";
 		if (err) {
+			tr.log(5,m,"name=" + name + " Received error:");
 			tr.log(5,m,err);
 			sendErrorResponse(res,rc,m,"ERROR starting VM " + name + " " + util.inspect(err));
 		}
 		else {
+			tr.log(5,m,"name=" + name + " No error. Reporting success.");
 			sendSuccessResponse(res,rc,m,"Started VM " + name);
 			recordActivityHelper(req, lessor, name, "Started");
 		}
-		tr.log(5,m,"Exit.");
+		tr.log(5,m,"Exit. name=" + name);
 	});
 
-	tr.log(5,m,'Exit');
+	tr.log(5,m,"Exit. name=" + name);
 }
 
 
@@ -1305,9 +1945,9 @@ function stopVM(req, res) {
 	var lessor = req.body.lessor;
 	tr.log(5,m,"name=" + name + " lessor=" + lessor);
 
-	// Verify the device is a VM, device is leased, and user owns the lease.
+	// Verify the device is a VM, device is leased, and user holds the lease.
 	if (!readyForHypervisor(name, lessor)) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own the VM. name=" + name);
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 
 	// Get the hypervisor for the VM
@@ -1317,9 +1957,13 @@ function stopVM(req, res) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
+
 	// Execute command
 	tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".stopVM(" + name + ")");
-	hypervisor.stopVM(name, function(err) {
+	hypervisor.stopVM(name, blob, function(err) {
+		var m = "stopVMCallback";
 		if (err) {
 			tr.log(5,m,err);
 			sendErrorResponse(res,rc,m,"ERROR stopping VM " + name + " " + util.inspect(err));
@@ -1334,6 +1978,89 @@ function stopVM(req, res) {
 	tr.log(5,m,'Exit');
 }
 
+
+/**
+ * Sets the name of the master VM snapshot.
+ * Returns a list of interesting information in response.
+ *
+ * Example:
+ * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "devicename":"wltestu2", "snapshotname":"201501300800", "lessor":"fred" }' http://localhost:7890/pool/setSnapshotName
+ * 
+ * Request:  curl -v -H "Content-Type: application/json" -X POST -d '{ "devicename":"vsun11a", "snapshotname":"fredflintstone", "lessor":"igor" }' http://localhost:7890/pool/setSnapshotName
+
+ * Response:
+ * [{"action":"setSnapshotName",
+ *   "rc":0,
+ *   "devicename":"wltestu2",
+ *   "newsnapshotname":"201501300800",
+ *   "msg":"Set snapshot name. device=wltestu2 snapshotname=201501300800"}]
+ */
+function setSnapshotName(req, res) {
+	var m = "setSnapshotName";
+	logClientRequest(req);
+	tr.log(5,m,"Entry.");	
+	var rc = { 'action': 'setSnapshotName', "devicename":devicename, "snapshotname":snapshotname };
+
+	// Extract the device name from the request.
+	var devicename = req.body.devicename;
+	var snapshotname = req.body.snapshotname;
+	var lessor = req.body.lessor;
+	tr.log(5,m,"devicename=" + devicename + " snapshotname=" + snapshotname + " lessor=" + lessor);
+
+	// Verify the device is valid.
+	if (!isKnownDevice(devicename)) {
+		return sendErrorResponse(res,rc,m,"ERROR: Device is not recognized. devicename=" + devicename + " snapshotname=" + snapshotname);
+	}
+	tr.log(5,m,"Device is valid.");
+
+	// Verify the device is a VM, device is leased, and user holds the lease.
+	if (!readyForHypervisor(devicename, lessor)) {
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. devicename=" + devicename + " lessee=" + lessor);
+	}
+	tr.log(5,m,"Device is a VM, leased, and leased by user.");
+
+/****
+	// Verify the hypervisor supports user-settable snapshot names.
+	if (!settableSnapshots(getHypervisor(devicename))) {
+		return sendErrorResponse(res,rc,m,"ERROR. Hypervisor " + hypervisor.name + " does not support user-settable snapshot names.");
+	}
+	tr.log(5,m,"Hypervisor supports user-settable snapshot names.");
+*/
+
+	// Verify the snapshot name looks reasonable.
+	if (4 > snapshotname.length) {
+		return sendErrorResponse(res,rc,m,"ERROR. Snapshot name is too short. devicename=" + devicename + " snapshotname=" + snapshotname);
+	}
+	if (32 < snapshotname.length) {
+		return sendErrorResponse(res,rc,m,"ERROR. Snapshot name is too long. devicename=" + devicename + " snapshotname=" + snapshotname);
+	}
+	tr.log(5,m,"Snapname looks reasonable.");
+
+
+	var device = getDeviceByName(devicename);
+
+	if (device.hasOwnProperty("owner")) {
+		var owner = device['owner'];
+
+		if (lessor == owner) {
+			var oldsnapname = snapshots.getSnapshotName(devicename);
+			var int_rc = snapshots.setSnapshotName(devicename, snapshotname);
+			if (0 == int_rc) {
+				recordActivityHelper(req, lessor, devicename, "SetSnapshotName(" + snapshotname + ")");
+				return sendSuccessResponse(res,rc,m,"Ok. Set snapshot name. devicename=" + devicename + " oldsnap=" + oldsnapname + " newsnap=" + snapshotname);
+			}
+			else {
+				return sendErrorResponse(res,rc,m,"ERROR: Could not set snapshot name. devicename=" + devicename + " snapshotname=" + snapshotname);
+			}
+		}
+		else {
+			return sendErrorResponse(res,rc,m,"ERROR: Can not set snapshot name because user is not adminstrative owner. lessee=" + lessor + " owner=" + owner);
+		}
+	}
+	else {
+		return sendErrorResponse(res,rc,m,"ERROR: Can not set snapshot name because TMCA does not know the administrator owner of device " + devicename);
+	}
+}
 
 /**
  * Renames a VirtualBox VM snapshot from master to old-yyyy-mmdd-hhss-xxxx.
@@ -1355,18 +2082,18 @@ function renameSnapshot(req, res) {
 	var rc = { 'name': name, 'action': 'renameSnapshot' };
 
 	// Extract the device name from the request.
-	var name = req.body.name
+	var name = req.body.name;
 	var lessor = req.body.lessor;
 	tr.log(5,m,"name=" + name + " lessor=" + lessor);
 
-	// Verify the device is a VM, device is leased, and user owns the lease.
+	// Verify the device is a VM, device is leased, and user holds the lease.
 	if (!readyForHypervisor(name, lessor)) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own the VM. name=" + name);
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 	
 	// Verify the lessor is authorized.
 	if (UPDATE_USER != lessor) {
-		return sendErrorResponse(res,rc,m,"ERROR. User " + UPDATE_USER + " does not own device. Current lessor: " + lessor);
+		return sendErrorResponse(res,rc,m,"ERROR. User " + UPDATE_USER + " is not lessee. Current lessee: " + lessor);
 	}
 
     // Define the names for snapshots.
@@ -1382,10 +2109,13 @@ function renameSnapshot(req, res) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
+
 	// Execute command
 	tr.log(5,m,"Calling hypervisor.renameSnapshot(" + name + ", " + oldSnapshotName + ", " + newSnapshotName + ")");
 	tr.log(5,m,"getName: " + hypervisor.getName());
-	hypervisor.renameSnapshot(name, oldSnapshotName, newSnapshotName, function(err) {
+	hypervisor.renameSnapshot(name, oldSnapshotName, newSnapshotName, blob, function(err) {
 		if (err) {
 			tr.log(5,m,err);
 			sendErrorResponse(res,rc,m,"ERROR renaming snapshot. vm name=" + name);
@@ -1424,14 +2154,14 @@ function takeSnapshot(req, res) {
 	var lessor = req.body.lessor;
 	tr.log(5,m,"name=" + name + " lessor=" + lessor);
 
-	// Verify the device is a VM, device is leased, and user owns the lease.
+	// Verify the device is a VM, device is leased, and user holds the lease.
 	if (!readyForHypervisor(name, lessor)) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own the VM. name=" + name);
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 
 	// Verify the lessor is authorized.
 	if (UPDATE_USER != lessor) {
-		return sendErrorResponse(res,rc,m,"ERROR. User " + UPDATE_USER + " does not own device. Current lessor: " + lessor);
+		return sendErrorResponse(res,rc,m,"ERROR. User " + UPDATE_USER + " is not lessee. Current lessee: " + lessor);
 	}
 
     // Define the name for the snapshot.
@@ -1445,10 +2175,13 @@ function takeSnapshot(req, res) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
+
 	// Execute command
 	tr.log(5,m,"Calling hypervisor.takeSnapshot(" + name + ")");
 	tr.log(5,m,"getName: " + hypervisor.getName());
-	hypervisor.takeSnapshot(name, newSnapshotName, function(err) {
+	hypervisor.takeSnapshot(name, newSnapshotName, blob, function(err) {
 		if (err) {
 			tr.log(5,m,err);
 			sendErrorResponse(res,rc,m,"ERROR taking snapshot. vame=" + name);
@@ -1487,14 +2220,14 @@ function updateSnapshot(req, res) {
 	var lessor = req.body.lessor;
 	tr.log(5,m,"name=" + name + " lessor=" + lessor);
 
-	// Verify the device is a VM, device is leased, and user owns the lease.
+	// Verify the device is a VM, device is leased, and user holds the lease.
 	if (!readyForHypervisor(name, lessor)) {
-		return sendErrorResponse(res,rc,m,"ERROR. User does not own the VM. name=" + name);
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
 	}
 	
 	// Verify the lessor is authorized.
 	if (UPDATE_USER != lessor) {
-		return sendErrorResponse(res,rc,m,"ERROR. User " + UPDATE_USER + " does not own device. Current lessor: " + lessor);
+		return sendErrorResponse(res,rc,m,"ERROR. User " + UPDATE_USER + " is not lessee. Current lessee: " + lessor);
 	}
 
     // Define the names for snapshots.
@@ -1514,9 +2247,12 @@ function updateSnapshot(req, res) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
+
 	tr.log(5,m,"Calling hypervisor.isRunning(" + name + ")");
 	tr.log(5,m,"getName: " + hypervisor.getName());
-	hypervisor.isRunning(name, function(err, running) {
+	hypervisor.isRunning(name, blob, function(err, running) {
 		var m = "isRunningCallback";
 		if (err) {
 			tr.log(5,m,err);
@@ -1546,7 +2282,7 @@ function updateSnapshot(req, res) {
 
 		tr.log(5,m,"Calling hypervisor.renameSnapshot(" + name + ", " + oldSnapshotName + ", " + renamedSnapshotName + ")");
 		tr.log(5,m,"getName: " + hypervisor.getName());
-		hypervisor.renameSnapshot(name, oldSnapshotName, renamedSnapshotName, function(err) {
+		hypervisor.renameSnapshot(name, oldSnapshotName, renamedSnapshotName, blob, function(err) {
 			var m = "renameSnapshotCallback";
 			if (err) {
 				tr.log(5,m,err);
@@ -1555,7 +2291,7 @@ function updateSnapshot(req, res) {
 
 			tr.log(5,m,"Calling hypervisor.takeSnapshot(" + name + ")");
 			tr.log(5,m,"getName: " + hypervisor.getName());
-			hypervisor.takeSnapshot(name, newSnapshotName, function(err) {
+			hypervisor.takeSnapshot(name, newSnapshotName, blob, function(err) {
 				var m = "takeSnapshotCallback";
 				if (err) {
 					tr.log(5,m,err);
@@ -1590,14 +2326,18 @@ function getIP(req, res) {
 	tr.log(5,m,"name=" + name);
 
 	// Get the hypervisor for the VM
+	// TODO:  How should we get the IP for a real machine???   Hack for today: use vlaunchhypervisor.
 	var hypervisor = getHypervisor(name);
 	tr.log(5,m,"hypervisor=" + hypervisor);
 	if (!hypervisor) {
 		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
 	}
 
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, null);
+
 	// get IP from hypervisor
-	hypervisor.getIP(name, function(err,rspObj) {
+	hypervisor.getIP(name, blob, function(err,rspObj) {
 		var ip = ((err || 0 != rspObj.rc) ? "" : rspObj.ip );
 		return res.send([{ 'name': name, 'ip': ip }]);
 	});
@@ -1607,8 +2347,8 @@ function getIP(req, res) {
  * Pings the specified specified hostname or IP.
  *
  * Example:
- * Request:  curl "http://localhost:7890/pool/canPing/ding.raleigh.ibm.com"
- * Response:  [{ "hostname": "ding.raleigh.ibm.com", "rc": 0, "msg": "blah blah" }] 
+ * Request:  curl "http://localhost:7890/pool/canPing/btfs.raleigh.ibm.com"
+ * Response:  [{ "hostname": "btfs.raleigh.ibm.com", "rc": 0, "msg": "blah blah" }] 
  */
 function canPing(req, res) {
 	var m = "canPing";
@@ -1667,13 +2407,13 @@ if (listenport == undefined) {
     returnExit();
 }
 
-//expiry = serverconfig.expiry;
-//if (expiry == undefined) {
-//	tr.log(5,m,"Error. expiry is undefined in server config file: " + SERVER_CONFIG_FILENAME);
-//	returnExit();
-//}
+maxLeaseMs = serverconfig.maxLeaseMs;
+if (maxLeaseMs == undefined) {
+	tr.log(5,m,"Error. maxLeaseMs is undefined in server config file: " + SERVER_CONFIG_FILENAME);
+	returnExit();
+}
 
-tr.log(5,m,"contextroot=" + contextroot + " listenport=" + listenport); // + " expiry=" + expiry);
+tr.log(5,m,"contextroot=" + contextroot + " listenport=" + listenport + " maxLeaseMs=" + maxLeaseMs);
 
 // Read the devices file.
 filetext = fs.readFileSync(DEVICES_FILENAME, 'utf8');
@@ -1681,11 +2421,45 @@ tr.log(5,m,"filetext: >>>" + filetext + "<<<");
 devices = JSON.parse(filetext);
 tr.log(5,m,"devices: " + util.inspect(devices));
 
+// Read the leases file.
+filetext = fs.readFileSync(LEASES_FILENAME, 'utf8');
+tr.log(5,m,"filetext: >>>" + filetext + "<<<");
+leases = JSON.parse(filetext);
+tr.log(5,m,"leases: " + util.inspect(leases));
+
 // Read the users file.
 filetext = fs.readFileSync(USERS_FILENAME, 'utf8');
 tr.log(5,m,"filetext: >>>" + filetext + "<<<");
 users = JSON.parse(filetext);
 tr.log(5,m,"users: " + util.inspect(users));
+
+// Get access to the snapshot names.
+tr.log(5,m,"Getting access to snapshot names. LOG_LEVEL=" + LOG_LEVEL + " LOG_FILENAME=" + LOG_FILENAME);
+var snapshots = new Snapshots(LOG_LEVEL, LOG_FILENAME);  // 5=verbose  3=medium  0=errors only
+
+// START - UNIT TEST
+/*
+tr.log(5,m,"Got access to snapshot names.");
+tr.log(5,m,snapshots.toString());
+var bozosnap = snapshots.getSnapshotName("bozo");
+tr.log(5,m,"bozosnap=" + bozosnap);
+var barneysnap = snapshots.getSnapshotName("barney");
+tr.log(5,m,"barneysnap=" + barneysnap);
+
+var src = snapshots.setSnapshotName("peter");
+tr.log(5,m,"rc=" + src);
+src = snapshots.setSnapshotName("peter","ps");
+tr.log(5,m,"rc=" + src);
+src = snapshots.setSnapshotName("peter","bozosnap");
+tr.log(5,m,"rc=" + src);
+
+petersnap = snapshots.getSnapshotName("peter");
+tr.log(5,m,"petersnap=" + petersnap);
+*/
+// FINISH UNIT TEST
+
+
+
 
 // Read the hypervisors file.
 filetext = fs.readFileSync('hypervisors.json', 'utf8');
@@ -1696,10 +2470,14 @@ for (var i=0; i<hypervisors.length; i++) {
 	var hypervisor = hypervisors[i];
 	var hypervisorName = hypervisor.name;
 	var className = hypervisor.classname;
+	var blob = { "hypervisor": hypervisor };
 	tr.log(5,m,"Handling hypervisor: " + hypervisorName + " classname: " + className);
 	// Assimilate the module.
 	var Class = require("./hypervisors/" + className + ".js");
-	hypervisor.object = new Class();
+	hypervisor.object = new Class(blob);
+	tr.log(5,m,"Assimilated new hypervisor object: " + util.inspect(hypervisor.object));
+	var hypervisorObject = hypervisor.object;
+	tr.log(5,m,"hypervisorObject.getName()=" + hypervisorObject.getName());
 }
 
 // Create a tmp directory if nonexistent.
@@ -1721,8 +2499,9 @@ tr.log(5,m,"Created HTTP server.");
 
 // Associate HTTP GET commands to javascript functions.
 server.get('/' + contextroot + '/', getHTML);
-server.get('/' + contextroot + '/log', getLog);
+server.get('/' + contextroot + '/log/:numchars', getLog);
 server.get('/' + contextroot + '/getAllDevices/:lessor', getAllDevices);
+server.get('/' + contextroot + '/getDevicesByContentsOSBits/:contents/:os/:bits/:lessor', getDevicesByContentsOSBits);
 server.get('/' + contextroot + '/getVMStatus/:name', getVMStatus);
 server.get('/' + contextroot + '/getIP/:name', getIP);
 server.get('/' + contextroot + '/canPing/:hostname', canPing);
@@ -1732,8 +2511,8 @@ server.post('/' + contextroot + '/leaseDeviceByContentsOSBits', leaseDeviceByCon
 server.post('/' + contextroot + '/leaseDeviceByOS', leaseDeviceByOS);
 server.post('/' + contextroot + '/leaseDeviceByName', leaseDeviceByName);
 server.post('/' + contextroot + '/unleaseDeviceByName', unleaseDeviceByName);
-server.post('/' + contextroot + '/addDevice', addDevice);
-server.post('/' + contextroot + '/removeDevice', removeDevice);
+//server.post('/' + contextroot + '/addDevice', addDevice);
+//server.post('/' + contextroot + '/removeDevice', removeDevice);
 
 // Associate HTTP POST commands to javascript functions for VM controls.
 server.post('/' + contextroot + '/restoreVM', restoreVM);
@@ -1741,16 +2520,65 @@ server.post('/' + contextroot + '/startVM', startVM);
 server.post('/' + contextroot + '/stopVM', stopVM);
 
 // Associate HTTP POST commands to javascript functions for VM snapshots.
+server.post('/' + contextroot + '/setSnapshotName', setSnapshotName);
 server.post('/' + contextroot + '/renameSnapshot', renameSnapshot);
 server.post('/' + contextroot + '/takeSnapshot', takeSnapshot);
 server.post('/' + contextroot + '/updateSnapshot', updateSnapshot);
 
+// For debug only
+server.post('/' + contextroot + '/slowsrv', slowsrv);
+
 // Start server and block here processing requests repeatedly.
+tr.log(5,m,"Starting server listening on port " + listenport + "...");
 server.listen(listenport, function() {
 	tr.log(5,m,server.name + ' listening at ' + server.url);
 });
 
-// Monitor all devices to kill those which are expired.
-//monitorExpiry();
+// Monitor all leases for expiration.
+monitorLeaseDuration();
+
+// Watch for updated users file.
+fs.watch( USERS_FILENAME, function(event,file) {
+    var m = "userwatcher";
+	tr.log(5,m,"Entry. event=" + util.inspect(event) + " file=" + util.inspect(file));
+
+	if ("change" === event) {
+		try {
+			// Read the users file.
+			var usertext = fs.readFileSync(USERS_FILENAME, 'utf8');
+			var usersTmp = JSON.parse(usertext);
+			users = usersTmp;
+			console.log("Successfully assimilated new users object.");
+		}
+		catch (e) {
+			console.log("Caught exception reading file " + USERS_FILENAME);
+			console.log(e);
+		}
+		tr.log(5,m,"Exit. users: " + util.inspect(users));
+	}
+});
+
+// Watch for updated devices file.
+fs.watch( DEVICES_FILENAME, function(event,file) {
+	var m = "deviceswatcher";
+	tr.log(5,m,"Entry. event=" + util.inspect(event) + " file=" + util.inspect(file));
+
+	if ("change" === event) {
+		try {
+			// Read the devices file.
+			var devicestext = fs.readFileSync(DEVICES_FILENAME, 'utf8');
+			var devicesTmp = JSON.parse(devicestext);
+			devices = devicesTmp;
+			tr.log(5,m,"Successfully assimilated new devices object.");
+		}
+		catch (e) {
+			tr.log(5,m,"Caught exception reading file " + DEVICES_FILENAME);
+			console.log(e);
+		}
+		tr.log(5,m,"Exit. devices: " + util.inspect(devices));
+	}
+});
+
+
 
 tr.log(5,m,"Exit.");

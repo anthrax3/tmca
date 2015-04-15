@@ -1,5 +1,5 @@
 """
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2014
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ limitations under the License.
             apt-get install python-novaclient
 
     To invoke:
-        python associate|deassociate <vmname>
+        python  opstx.py  associate|deassociate  <vmname>
 
     Returns rc=0 on success
 
@@ -36,6 +36,7 @@ import sys
 from novaclient.v1_1 import client
 from novaclient import utils
 from novaclient.v1_1 import servers
+from random import choice
 
 # return codes.
 RC_MISSING_ENV_VARS = 100
@@ -81,21 +82,57 @@ def getAvailableFloatingIP(cs):
     return None
 
 
-def getAssociatedFloatingIP(cs, server):
-    """Gets a floating IP address which has been associated with a VM instance.
+def getRandomAvailableFloatingIP(cs):
+    """Gets a random floating IP address from the pool.
        Returns FloatingIP object or None."""
-    m = "getAssociatedFloatingIP"
+    m = "getRandomAvailableFloatingIP"
     sop(m,"Entry.")
 
+    available_ip_list = []
     floating_ip_list = cs.floating_ips.list()
     sop(m,"floating_ip_list: %s" % ( repr(floating_ip_list) ))
     for floating_ip in floating_ip_list:
         sop(m,"floating_ip: %s" % ( repr(floating_ip) ))
-        if server.id == floating_ip.instance_id:
-            sop(m,"Exit. Found matching server instance ID.")
-            return floating_ip
+        if None == floating_ip.instance_id:
+            available_ip_list.append(floating_ip)
 
-    sop(m,"Exit. Did not find matching floating_ip. Returning None")
+    if 0 == len(available_ip_list):
+        sop(m,"Exit. Did not find available floating_ip. Returning None")
+        return None
+    else:
+        random_ip = choice(available_ip_list)
+        sop(m,"Exit. Returning random available floating ip.")
+        return random_ip
+
+
+def getAssociatedFloatingIP(cs, server, numRetries):
+    """Gets a floating IP address which has been associated with a VM instance.
+       Returns FloatingIP object or None."""
+    m = "getAssociatedFloatingIP"
+    sop(m,"Entry. server=%s numRetries=%i" % ( repr(server), numRetries ))
+
+    numExceptions = 0
+    while numRetries > 0 and numExceptions < 3:
+        try:
+            floating_ip_list = cs.floating_ips.list()
+            sop(m,"floating_ip_list: %s" % ( repr(floating_ip_list) ))
+            for floating_ip in floating_ip_list:
+                sop(m,"floating_ip: %s" % ( repr(floating_ip) ))
+                if server.id == floating_ip.instance_id:
+                    sop(m,"Exit. Found matching server instance ID. server=%s  Returning ip=%s" % ( repr(server), repr(floating_ip) ))
+                    return floating_ip
+            # decrement retry count only when there are no exceptions.
+            numRetries = numRetries - 1
+        except Exception as e:
+            sop(m,"ERROR: Caught exception from python-novaclient for server=" + repr(server) + ":")
+            sop(m,e)
+            numExceptions = numExceptions + 1
+
+        if numRetries > 0 and numExceptions < 3:   # Ugly construction! duplicate code. Fix this.
+            sop(m,"Sleeping briefly. server=" + repr(server) + " numRetries=%i numExceptions=%i" % (numRetries, numExceptions))
+            time.sleep(3)
+
+    sop(m,"Exit. Did not find matching floating_ip. Retries exhausted. Returning None. server=%s" % ( repr(server) ))
     return None
 
 
@@ -135,27 +172,56 @@ def waitForServerActive(cs, vmname):
     sop(m,"Entry. vmname=" + vmname)
     server = None
 
-    # Initial design:  24 attempts, 7 seconds each, yields 2 minutes, 48 seconds.
-    # Andy witnessed one launch take 2+ mins to go from state booting to active.
-    numRetries = 24  
+    # Try for 100 attempts, 3 seconds each, yields 5 minutes.
+    # (Andy witnessed one launch take 4 mins to go from state booting to active.)
+    numRetries = 100
     while numRetries > 0:
         numRetries = numRetries - 1
-        # important: get a fresh view of server status on every retry.
-        server = utils.find_resource(cs.servers, vmname)
-        if None == server:
-            sop(m,"ERROR: Server not found: " + vmname)
-            sys.exit(RC_SERVER_NOT_FOUND)
-        status = server.status.lower()
-        if "active" == status or "error" == status:
-            sop(m,"Exit. status=" + status)
-            return server
-        sop(m,"Sleeping briefly. status=" + status + " numRetries=%i" % (numRetries))
-        time.sleep(7)
+        try:
+            # important: get a fresh view of server status on every retry.
+            server = utils.find_resource(cs.servers, vmname)
+            if None == server:
+                sop(m,"ERROR: Server not found: " + vmname)
+                sys.exit(RC_SERVER_NOT_FOUND)
+            status = server.status.lower()
+            if "active" == status or "error" == status:
+                sop(m,"Exit. server=" + vmname + " status=" + status)
+                return server
+        except Exception as e:
+            sop(m,"ERROR: Caught exception from python-novaclient for server=" + vmname + ":")
+            sop(m,e)
+        sop(m,"Sleeping briefly. server=" + vmname + " status=" + status + " numRetries=%i" % (numRetries))
+        time.sleep(3)
 
-    sop(m,"Exit. Timeout expired. status=" + status)
+    sop(m,"Exit. Timeout expired. server=" + vmname + " status=" + status)
     return server
 
 #-----------------------------------------------------------------------
+def isactive(cs,vmname):
+    """Indicates whether the specified VM is active. Returns rc=0 when active."""
+    m = "isactive"
+    sop(m,"Entry. vmname=" + vmname)
+
+    try:
+        server = utils.find_resource(cs.servers, vmname)
+        if None == server:
+            sop(m,"ERROR: Server not found: " + vmname + " Returning RC_SERVER_NOT_FOUND")
+            sys.exit(RC_SERVER_NOT_FOUND)
+        status = server.status.lower()
+        if "error" == status:
+            sop(m,"Exit. status=" + status + " vmname=" + vmname + " Returning RC_SERVER_ERROR")
+            sys.exit(RC_SERVER_ERROR)
+        if "active" != status:
+            sop(m,"Exit. status=" + status + " vmname=" + vmname + " Returning RC_SERVER_NOT_ACTIVE")
+            sys.exit(RC_SERVER_NOT_ACTIVE)
+        sop(m,"Exit. status=" + status + " vmname=" + vmname + " Returning rc=0")
+        sys.exit(0)
+    except Exception as e:
+        sop(m,"ERROR: Caught exception from python-novaclient for server " + vmname + ":")
+        sop(m,e)
+        sop(m,"Returning RC_SERVER_NOT_FOUND")
+        sys.exit(RC_SERVER_NOT_FOUND)
+
 def associate(cs,vmname):
     """Gets a floating IP address from the pool and associates it with the specified VM."""
     m = "associate"
@@ -166,22 +232,49 @@ def associate(cs,vmname):
         sop(m,"ERROR. Server is not active: " + vmname)
         sys.exit(RC_SERVER_NOT_ACTIVE)
 
-    floating_ip = getAssociatedFloatingIP(cs, server)
+    floating_ip = getAssociatedFloatingIP(cs, server, 1)
     if None != floating_ip:
         sop(m,"ERROR: A floating IP is already associated with server: " + vmname)
         sys.exit(RC_IP_ALREADY_ASSOCIATED)
 
-    floating_ip = getAvailableFloatingIP(cs)
-    if None == floating_ip:
-        sop(m,"A floating IP is not initially available. Trying to allocate an IP...")
-        allocateFloatingIP(cs, OS_IP_POOL_NAME)
-        floating_ip = getAvailableFloatingIP(cs)
-        if None == floating_ip:
-            sop(m,"ERROR: A floating IP is not available after allocate for server: " + vmname)
-            sys.exit(RC_IP_NOT_AVAILABLE)
+    numRetries = 7
+    while numRetries > 0:
+        try:
+            numRetries = numRetries - 1
+            floating_ip = getRandomAvailableFloatingIP(cs)
+            if None == floating_ip:
+                sop(m,"A floating IP is not initially available. Trying to allocate an IP...")
+                allocateFloatingIP(cs, OS_IP_POOL_NAME)
+                floating_ip = getRandomAvailableFloatingIP(cs)
+                if None == floating_ip:
+                    sop(m,"ERROR: A floating IP is not available after allocate for server: " + vmname)
+                    sys.exit(RC_IP_NOT_AVAILABLE)
 
-    sop(m,"Adding floating_ip %s to server %s" % (repr(floating_ip.ip), repr(server)))
-    server.add_floating_ip(floating_ip.ip)
+            sop(m,"Adding floating_ip %s to server %s" % (repr(floating_ip.ip), repr(server)))
+            server.add_floating_ip(floating_ip.ip)
+
+            sop(m,"Sleeping briefly before confirming.")
+            time.sleep(2)
+
+            actual_floating_ip = getAssociatedFloatingIP(cs, server, 7)
+            if None != actual_floating_ip:
+                if repr(floating_ip.ip) == repr(actual_floating_ip.ip):
+                    sop(m,"Confirmed requested floating IP %s is associated with server %s." % (repr(actual_floating_ip.ip), vmname))
+                else:
+                    sop(m,"WARNING: Unexpected floating IP is associated with server %s. expected=%s actual=%s" % (vmname, repr(floating_ip.ip), repr(actual_floating_ip.ip)))
+                break
+
+        except Exception as e:
+            sop(m,"ERROR: Caught exception from python-novaclient for server " + vmname + ":")
+            sop(m,e)
+
+        sop(m,"WARNING: A floating IP is not associated with server %s. Sleeping before retry. numRetries=%i" % (vmname, numRetries))
+        # Slowly increase sleep time.
+        time.sleep(1 + (7 - numRetries))
+
+    if None == actual_floating_ip:
+        sop(m,"ERROR: Could not confirm a floating IP is associated with server: " + vmname + ". All retries exhausted.")
+        sys.exit(RC_IP_NOT_ASSOCIATED)
 
     sop(m,"Exit.")
 
@@ -189,6 +282,13 @@ def associate(cs,vmname):
 def deassociate(cs,vmname):
     """Removes a floating IP address from the specified VM."""
     m = "deassociate"
+
+
+    # Note changed behavior:  Do nothing. Let OpenStack clean up the Floating IPs.	
+    sop(m,"Entry/exit. Doing nothing. Returning success.")
+    return None
+
+
     sop(m,"Entry. vmname=" + vmname)
 
     server = utils.find_resource(cs.servers, vmname)
@@ -196,7 +296,7 @@ def deassociate(cs,vmname):
         sop(m,"ERROR: Server not found: " + vmname)
         sys.exit(RC_SERVER_NOT_FOUND)
 
-    floating_ip = getAssociatedFloatingIP(cs, server)
+    floating_ip = getAssociatedFloatingIP(cs, server, 1)
     if None == floating_ip:
         sop(m,"ERROR: A floating IP was not associated with server: " + vmname)
         sys.exit(RC_IP_NOT_ASSOCIATED)
@@ -221,7 +321,7 @@ def displayassociated(cs,vmname):
         sop(m,"ERROR: Server not found: " + vmname)
         sys.exit(RC_SERVER_NOT_FOUND)
 
-    floating_ip = getAssociatedFloatingIP(cs, server)
+    floating_ip = getAssociatedFloatingIP(cs, server, 1)
     if None == floating_ip:
         sop(m,"ERROR: A floating IP was not associated with server: " + vmname)
         sys.exit(RC_IP_NOT_ASSOCIATED)
@@ -262,8 +362,9 @@ sop(m,"os_password=XXXXXXXXXX")
 
 
 # parse args
+supported_args = "associate|displayassociated|deassociate|isactive"
 if 3 != len(sys.argv):
-    sop(m,"ERROR: Please specify args: associate|displayassociated|deassociate <vmname>.")
+    sop(m,"ERROR: Please specify args: " + supported_args + " <vmname>.")
     sys.exit(RC_INCORRECT_ARGS)
 arg_action = sys.argv[1]
 arg_vmname = sys.argv[2]
@@ -285,6 +386,8 @@ try:
         displayassociated(cs, arg_vmname)
     elif "deassociate" == arg_action:
         deassociate(cs, arg_vmname)
+    elif "isactive" == arg_action:
+        isactive(cs, arg_vmname)
 
     # for debug only...
     elif "deallocate" == arg_action:
@@ -292,7 +395,7 @@ try:
     elif "allocate" == arg_action:
         allocateFloatingIP(cs, OS_IP_POOL_NAME)
     else:
-        sop(m,"ERROR: Please specify args: python opstx.py associate|deassociate <vmname>")
+        sop(m,"ERROR: Please specify args: " + supported_args + " <vmname>.")
         sys.exit(RC_UNRECOGNIZED_ACTION)
 
 except Exception as e:

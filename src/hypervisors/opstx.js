@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2014
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ limitations under the License.
 */
 
 var Tr = require('./../tr.js');
+var UniqueString = require('./../uniquestring.js');
 var	proc = require('child_process');
 var fs = require('fs');
 var http = require('http');
@@ -44,6 +45,12 @@ var Opstx = function() {
 	 * Init: Open a log file
 	 */
 	var tr = new Tr("opstx.js", 5, "out.log");  // 5=verbose  3=medium  0=errors only
+
+
+	/**
+	 * Init: Instantiate an object to return unique strings, used for tmp file names.
+	 */
+	var uniqueString = new UniqueString();
 
 
 	/**
@@ -136,29 +143,70 @@ var Opstx = function() {
 	 * 			Pipes the results to a file, then searches the file.
 	 */
 	this.getVMState = function(vmname, callback) {
-		var m = "getVMState";
-		tr.log(5,m,"Entry. vmname=" + vmname);
+		var detailed = "false";
+		prvGetDetailedVMState(vmname, detailed, callback);
+	};
 
-		var filename = "tmp/get.vm.state.tmp";
+
+	/**
+	 * API: Returns the full detailed state of the VM.
+	 * 	callback(err, responseObject)
+	 * 		where responseObject = { rc: 0, state: NON_EXISTENT|ACTIVE|PAUSED|BUILD|ERROR|UNRECOGNIZED, msg: "message" } 
+	 *			note boolean in responseObject
+	 *
+	 * Uses the command-line command:
+	 *		nova list
+	 * 			Pipes the results to a file, then searches the file.
+	 */
+	this.getDetailedVMState = function(vmname, callback) {
+		var detailed = "true";
+		prvGetDetailedVMState(vmname, detailed, callback);
+	};
+
+
+	/**
+	 * Private: Returns the state of the VM.
+	 *
+	 * If detailed, returns:
+	 * 	callback(err, responseObject)
+	 * 		where responseObject = { rc: 0, state: NON_EXISTENT|ACTIVE|PAUSED|UNRECOGNIZED, msg: "message" } 
+	 * 	else returns: 
+	 * 		where responseObject = { rc: 0, state: NON_EXISTENT|ACTIVE|PAUSED|BUILD|ERROR|UNRECOGNIZED, msg: "message" } 
+	 *			note boolean in responseObject
+	 *
+	 * Uses the command-line command:
+	 *		nova list
+	 * 			Pipes the results to a file, then searches the file.
+	 */
+	var prvGetDetailedVMState = function(vmname, detailed, callback) {
+		var m = "prvGetDetailedVMState";
+		tr.log(5,m,"Entry. vmname=" + vmname + " detailed=" + detailed);
+
+		var filename = "tmp/get.vm.state." + vmname + "." + uniqueString.getUniqueString();
 		cmd = "nova list > " + filename;
 		tr.log(5,m,"Running: " + cmd);
 
 		// Execute command.
 		proc.exec(cmd, function (err, stdout, stderr) {
 			var m = 'getVMStateCallback';
-			tr.log(5,m,"Entry. err: ", err);
-			tr.log(5,m,"stdout:\n",stdout);
-			tr.log(5,m,"stderr:\n",stderr);
+			tr.log(5,m,"Entry. vmname=" + vmname + " err: ", err);
+			tr.log(5,m,"vmname=" + vmname + " stdout:\n",stdout);
+			tr.log(5,m,"vmname=" + vmname + " stderr:\n",stderr);
 			if (err) {
+				tr.log(5,m,"Received error. Calling cb.");
 				return callback("ERROR issuing command: " + cmd);
 			}
 
 			// read
 			var line;
 			var fileContentsString = fs.readFileSync( filename, 'utf8');
-			tr.log(5,m,"fileContentsString: >>>" + fileContentsString + "<<<");
+			tr.log(5,m,"vmname=" + vmname + " fileContentsString: >>>" + fileContentsString + "<<<");
+
+			// Delete the tmp file.
+			fs.unlinkSync(filename);
+
 			var fileContentsList = fileContentsString.split("\n");
-			tr.log(5,m,"fileContentsList.length=" + fileContentsList.length);
+			tr.log(5,m,"vmname=" + vmname + " fileContentsList.length=" + fileContentsList.length);
 			for (var i=0; i<fileContentsList.length; i++) {
 				line = fileContentsList[i];
 				console.log("line: " + line);
@@ -171,7 +219,7 @@ var Opstx = function() {
 			}
 
 			if (!line) {
-				var msg = "VM " + vmname + " does not exist.";
+				var msg = "VM " + vmname + " does not exist. Returning state NON_EXISTENT.";
 				tr.log(5,m,msg);
 				return callback(null,{"rc": 0, "state": "NON_EXISTENT", "msg": msg });
 			}
@@ -186,6 +234,16 @@ var Opstx = function() {
 					tr.log(5,m,msg);
 					return callback(null,{"rc": 0, "state": "PAUSED", "msg": msg });
 				}
+				else if ("true" == detailed && -1 < line.indexOf("BUILD")) {
+					var msg = "VM " + vmname + " state is BUILD.";
+					tr.log(5,m,msg);
+					return callback(null,{"rc": 0, "state": "BUILD", "msg": msg });
+				}
+				else if ("true" == detailed && -1 < line.indexOf("ERROR")) {
+					var msg = "VM " + vmname + " state is ERROR.";
+					tr.log(5,m,msg);
+					return callback(null,{"rc": 0, "state": "ERROR", "msg": msg });
+				}
 				else {
 					var msg = "VM " + vmname + " state is UNRECOGNIZED.";
 					tr.log(5,m,msg);
@@ -194,7 +252,7 @@ var Opstx = function() {
 			}
 		});
 
-		tr.log(5,m,"Exit.");
+		tr.log(5,m,"Exit. vmname=" + vmname);
 	};
 
 
@@ -276,10 +334,17 @@ var Opstx = function() {
 		var m = "bootVM";
 		tr.log(5,m,"Entry. vmname=" + vmname + " flavor=" + flavor + " image=" + image + " key_name=" + key_name);
 
+		// Use key_name only if specified.
+		var key_name_arg = "";
+		if (null != key_name && 0 < key_name.length) {
+			key_name_arg = " --key_name " + key_name;
+			tr.log(5,m,"Specifying option --key_name=" + key_name);
+		}
+
 		var cmd = "nova boot" +
 			" --flavor " + flavor + 
 			" --image " + image +
-			" --key_name " + key_name +
+			key_name_arg +
 			" " + vmname;
 
 		tr.log(5,m,'Running: ' + cmd);

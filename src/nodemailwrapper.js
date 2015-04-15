@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2014
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@ limitations under the License.
 	To use this module, simply call method sendEmail with recipients and contents.
 
 	AD 2013-0319-1457
+	AD 2014-1014-1110 - Updated for Nodemailer version v1.0
+		See migration guide from v0.7 to v1.0  https://github.com/andris9/Nodemailer
 */
 var nodemailer = require('nodemailer');
 var fs = require('fs');
@@ -47,8 +49,11 @@ var NodeMailWrapper = function() {
 
 		// Create transport method for the sender.
 		var smptSrv = "relay.uk.ibm.com";
-		var smtpTransport = nodemailer.createTransport("SMTP", {
-		    host: smptSrv
+		var smtpTransport = nodemailer.createTransport({
+		    host: smptSrv,
+		    tls: {
+		        rejectUnauthorized: false
+		    }
 		});
 
 		// Get local hostname on which this TMCA process is running.
