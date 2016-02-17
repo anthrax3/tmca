@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2013,2015
+Copyright IBM Corp. 2013,2016
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -45,8 +45,11 @@ var LOG_FILENAME = "log.txt"
 var LOG_LEVEL = 5;
 var tr = new Tr("tmca.js", LOG_LEVEL, LOG_FILENAME);  // 5=verbose  3=medium  0=errors only
 
-// Instantiate a high-level activity log.
+// Instantiate a high-level activity log in human-readable form.
 var activityLog = new Tr("",5,"activity.txt");
+
+// Instantiate a high-level activity log in machine-readable form.
+var activityJson = new Tr("",5,"activity.json");
 
 /**
  * User name of the administrator of this service.  Used to send emails.
@@ -159,11 +162,11 @@ function logClientRequest(req) {
 }
 
 /**
- * Records activity for analysis and debug.
- * Example:  recordActivity( "wltestu0", "[2013-0331] leased by francois/9.24.35.42");
+ * Records activity for analysis and debug to a human-readable log file.
+ * Example:  recordActivityLog( "wltestu0", "[2013-0331] leased by francois/9.24.35.42");
  */
-function recordActivity(devicename, activity) {
-	var m = 'recordActivity';
+function recordActivityLog(devicename, activity) {
+	var m = 'recordActivityLog';
 	tr.log(5,m,'Entry. devicename=' + devicename + ' activity=' + activity);
 	activityLog.log(5,devicename,activity + "<br>");
 	activity = '[' + tr.getLogTimestamp() + '] ' + activity;
@@ -181,6 +184,25 @@ function recordActivity(devicename, activity) {
 }
 
 /**
+ * Records activity for analysis and debug to a JSON file.
+ * Example:  { "lessee":"johndoe", "action":"leased", "devicename":"oradb11c" }
+ */
+function recordActivityJson(lessor, devicename, action, lessorAddress) {
+	var m = 'recordActivityJson';
+	//tr.log(5,m,'Entry. lessor=' + lessor + ' devicename=' + devicename + ' action=' + action + ' lessorAddress=' + lessorAddress);
+
+	var activity = {
+		"lessee": lessor,
+		"lesseeAddress": lessorAddress,
+		"devicename": devicename,
+		"action": action
+		};
+
+	tr.log(5,m,"Recording activity in json file: " + util.inspect(activity));
+	activityJson.json(activity);
+}
+
+/**
  * Records the specified action in the activity cache.
  * Example: recordActivityHelper(  req, "francois", "wltestu0", "leased");
  */
@@ -190,7 +212,8 @@ function recordActivityHelper(req, lessor, devicename, action) {
 	var lessorSocket = req.connection;
 	var lessorAddress = lessorSocket.remoteAddress;
 	var activity = action + ' by ' + lessor + '/' + lessorAddress;
-	recordActivity(devicename, activity);
+	recordActivityLog(devicename, activity);
+	recordActivityJson(lessor, devicename, action, lessorAddress);
 }
 
 /**
@@ -360,6 +383,7 @@ function getDevicesFiltered(lessor) {
 			rcDevice['password'] = '.';
 			rcDevice['adminname'] = '.';
 			rcDevice['adminpswd'] = '.';
+			rcDevice['remote_access_comments'] = '.';
 
 			// Enable/disable the lease button for windows and MSDN license.
 			if ("windows" == device['os']) {
@@ -1294,7 +1318,7 @@ function leaseDeviceByOS(req, res) {
  * Otherwise, returns an empty list.
  *
  * Example:
- * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "name":"dingHTC","lessor":"fred" }' http://localhost:7890/pool/leaseDeviceByName/
+ * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "name":"dingHTC","lessor":"fred" }' http://localhost:7890/pool/leaseDeviceByName
  * Response:  [{ "name": "dingHTC", 
  *               "os": "android2.3", 
  *               "hostname": "dingp.raleigh.ibm.com", 
@@ -1392,7 +1416,7 @@ function slowsrv(req, res) {
 function unleaseDevice(req, rc, device, res) {
 	var m = "unleaseDevice";
 	tr.log(5,m,"Entry.");// device=" + JSON.stringify(device));	
-    tr.log(5,m,"device=" + util.inspect(device));
+	tr.log(5,m,"device=" + util.inspect(device));
 
 	var lease = getLeaseByName(device.name);
 
@@ -1407,6 +1431,7 @@ function unleaseDevice(req, rc, device, res) {
 	tr.log(5,m,msg);
 	rc['rc'] = 0;
 	rc['msg'] = msg;
+	//tr.log(5,m,"Responding with object rc: " + util.inspect(rc));
 	res.send([rc]);
 
 	// Record activity.
@@ -1812,7 +1837,7 @@ function sendSuccessResponse(res,rc,m,msg) {
  * Returns an empty list on success.
  *
  * Example:
- * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "name":"wltestu2", "lessor":"fred" }' http://localhost:7890/pool/restoreVM/
+ * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "name":"wltestu2", "lessor":"fred" }' http://localhost:7890/pool/restoreVM
  * Response:  []
  */
 function restoreVM(req, res) {
@@ -1971,6 +1996,110 @@ function stopVM(req, res) {
 		else {
 			sendSuccessResponse(res,rc,m,"Stopped VM " + name);
 			recordActivityHelper(req, lessor, name, "Stopped");
+		}
+		tr.log(5,m,"Exit.");
+	});
+
+	tr.log(5,m,'Exit');
+}
+
+
+/**
+ * Stops, retores, and unleases a Virtual Machine.
+ *
+ * Warning: Does not work with vLaunch (because vLaunch reboots VMs after restore)
+ * 
+ * 2016-0107-1200 New feature request from Danny B
+ *
+ * Example:
+ * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "name":"wltestu2", "lessor":"fred" }' http://localhost:7890/pool/stopRestoreUnleaseVM
+ * Response:  
+ */
+function stopRestoreUnleaseVM(req, res) {
+	private_stopRestoreUnleaseVM(req, res, true);
+}
+
+
+/**
+ * Stops and unleases a Virtual Machine.
+ *
+ * Example:
+ * Request: curl -v -H "Content-Type: application/json" -X POST -d '{ "name":"wltestu2", "lessor":"fred" }' http://localhost:7890/pool/stopUnleaseVM
+ * Response:  
+ */
+function stopUnleaseVM(req, res) {
+	private_stopRestoreUnleaseVM(req, res, false);
+}
+
+
+/**
+ * Helper function stops, retores, and unleases a Virtual Machine.
+ */
+function private_stopRestoreUnleaseVM(req, res, doRestore) {
+	var m = "stopRestoreUnleaseVM";
+	logClientRequest(req);
+	tr.log(5,m,"Entry. doRestore=" + doRestore);	
+	var rc = { 'name': name, 'action': 'stopRestoreUnleaseVM' };
+
+	// Extract the device name from the request.
+	var name = req.body.name
+	var lessor = req.body.lessor;
+	tr.log(5,m,"name=" + name + " lessor=" + lessor);
+
+	// Verify the device is a VM, device is leased, and user holds the lease.
+	if (!readyForHypervisor(name, lessor)) {
+		return sendErrorResponse(res,rc,m,"ERROR. User is not lessee. name=" + name);
+	}
+
+	// Get the hypervisor for the VM
+	var hypervisor = getHypervisor(name);
+	tr.log(5,m,"hypervisor=" + util.inspect(hypervisor));
+	if (!hypervisor) {
+		return sendErrorResponse(res,rc,m,"ERROR. Could not find hypervisor for VM: " + name);
+	}
+
+	// Reject restore operations on vLaunch hypervisor, since vLaunch automatically reboots the VM after restore.
+	if (doRestore && "vlaunch" == hypervisor.getName()) {
+		return sendErrorResponse(res,rc,m,"ERROR. Sorry, operations stop, restore, and unlease are not supported with hypervisor vLaunch.");
+	}
+
+	// Get the snapshot name for the VM
+	// var snapshotname = getSnapshotName(name);
+	var snapshotname = snapshots.getSnapshotName(name);
+
+	// Get miscellaneous information which may be required by the hypervisor.
+	var blob = getBlob(name, lessor);
+
+	// Get device object for VM.
+	var device = getDeviceByName(name);
+
+	// Execute command to stop VM.
+	tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".stopVM(" + name + ")");
+	hypervisor.stopVM(name, blob, function(err) {
+		var m = "stopRestoreUnleaseVMCallback1";
+		if (err) {
+			tr.log(5,m,err);
+			sendErrorResponse(res,rc,m,"ERROR stopping VM " + name + " " + util.inspect(err));
+		}
+		else if (doRestore) {
+			// Execute command to restore VM.
+			tr.log(5,m,"Calling hypervisor " + hypervisor.getName() + ".restoreVM(" + name + ", " + snapshotname + ")");
+			hypervisor.restoreVM(name, snapshotname, blob, function(err) {
+				var m = "stopRestoreUnleaseVMCallback2";
+				if (err) {
+					tr.log(5,m,err);
+					sendErrorResponse(res,rc,m,"ERROR restoring VM " + name + " " + util.inspect(err));
+				}
+				else {
+					tr.log(5,m,"Executing command to unlease VM after stop and restore.");
+					return unleaseDevice(req, rc, device, res);
+				}
+				tr.log(5,m,"Exit.");
+			});
+		}
+		else {
+			tr.log(5,m,"Executing command to unlease VM after stop.");
+			return unleaseDevice(req, rc, device, res);
 		}
 		tr.log(5,m,"Exit.");
 	});
@@ -2518,6 +2647,10 @@ server.post('/' + contextroot + '/unleaseDeviceByName', unleaseDeviceByName);
 server.post('/' + contextroot + '/restoreVM', restoreVM);
 server.post('/' + contextroot + '/startVM', startVM);
 server.post('/' + contextroot + '/stopVM', stopVM);
+
+// Associate HTTP POST commands to javascript functions for hybrid leasing and VM control commands.
+server.post('/' + contextroot + '/stopUnleaseVM', stopUnleaseVM);
+server.post('/' + contextroot + '/stopRestoreUnleaseVM', stopRestoreUnleaseVM);
 
 // Associate HTTP POST commands to javascript functions for VM snapshots.
 server.post('/' + contextroot + '/setSnapshotName', setSnapshotName);

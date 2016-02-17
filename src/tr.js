@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2013
+Copyright IBM Corp. 2013,2016
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ limitations under the License.
 
 */
 var fs = require('fs');
+var util = require('util');
 
 /*
     Constructor parameters:
@@ -48,6 +49,11 @@ var Tr = function(classname, logLevel, logfilename) {
     // Helper method returns an internationally-understandable timestamp string. 
     this.getLogTimestamp = function() {
         var now = new Date();
+		return this.getLogTimestampByDate(now);
+	}
+
+    // Helper method returns an internationally-understandable timestamp string for the specified date.
+    this.getLogTimestampByDate = function(now) {
         var year = now.getFullYear();
         var month = twodigits(1 + now.getMonth());
         var date = twodigits(now.getDate());
@@ -83,6 +89,30 @@ var Tr = function(classname, logLevel, logfilename) {
             }
         }
     }
+
+	// Public method prints a javascript object.
+	// Inserts timestamp variables to the object for current time.
+	// Intended to produce machine-readable output.
+	// Intended to append to an ever-growing JSON file.
+	//
+	// Caveats: This function does not produce perfect-format JSON.
+	// - It does not print opening or closing square brackets.
+	// - It appends a comma after each entry.
+	// - You need to manually append a square brackets after the last entry.
+	// I declare these are reasonable tasks, given the rich value provided. 
+	this.json = function(jsonObject) {
+
+		// Insert time stamps.
+		var date = new Date();
+		var now = date.getTime();
+		jsonObject["timestamp"] = now;
+		jsonObject["timestampString"] = this.getLogTimestampByDate(date);
+
+		// Append to log file.
+		if (logfilename) {
+			fs.appendFileSync(logfilename, util.inspect(jsonObject) + ",\n", encoding='utf8');
+		}
+	}
 };
 
 module.exports = Tr;

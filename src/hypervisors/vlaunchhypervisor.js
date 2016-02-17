@@ -1,5 +1,5 @@
 /**
-Copyright IBM Corp. 2014,2015
+Copyright IBM Corp. 2014,2016
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -46,9 +46,9 @@ var VLaunchHypervisor = function(blob) {
 	var deviceSyncBlocks = {};
 
 	// Define timeouts
-	var TIMEOUT_RESTORE_MS = 60000;  // 1 minute
-	var TIMEOUT_POWER_ON_MS = 120000;  // 2 minutes
-	var TIMEOUT_POWER_OFF_MS = 180000;  // 3 minutes
+	var TIMEOUT_RESTORE_MS = 180000;  // 3 minutes
+	var TIMEOUT_POWER_ON_MS = 240000;  // 4 minutes
+	var TIMEOUT_POWER_OFF_MS = 240000;  // 4 minutes
 	var TIMEOUT_POLL_MS = 3456;  // 3+ seconds
 	
 	// Define constants for HTTP response codes.
@@ -606,9 +606,22 @@ var VLaunchHypervisor = function(blob) {
 						return callback(null,{"rc": 0, "msg": msg });
 					}
 
+				/** AD 2016-0105-1500 Original code used endpoint 'requests'. New code uses 'actions/poweroff'.
 					// Prepare request
 					var url = vLaunchURL + "/requests";
 					var payload = { "workflow_id": 128, "vm_id": vmid };
+					var headers = { "Authorization": "Token token=" + token };
+					var options = {
+						"headers": headers,
+						rejectUnauthorized: false,
+						json: true
+					};
+				*/
+
+					// Prepare request
+					//tr.log(5,m,"Preparing request.");
+					var url = vLaunchURL + "/actions/poweroff";
+					var payload = { "vm_id": vmid, "force": 1 }
 					var headers = { "Authorization": "Token token=" + token };
 					var options = {
 						"headers": headers,

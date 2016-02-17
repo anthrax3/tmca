@@ -1,5 +1,5 @@
 <!--  
-Copyright IBM Corp. 2013,2014
+Copyright IBM Corp. 2013,2016
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -85,10 +85,10 @@ limitations under the License.
 					var newHtml = 
 					'<table border="1" cellpadding="4">' +
 						"<tr>" +
-							'<th colspan="7">Machines</th>' +
+							'<th colspan="8">Machines</th>' +
 							'<th colspan="4">Leases</th>' +
 							'<th colspan="3">Hypervisor</th>' +
-							'<th colspan="5">Remote Access</th>' +
+							'<th colspan="6">Remote Access</th>' +
 						"</tr>" +
 						"<tr>" +
 							"<th>name</th>" +
@@ -98,6 +98,7 @@ limitations under the License.
 							"<th>bits</th>" +
 							"<th>contents</th>" +
 							"<th>owner</th>" +
+							"<th>comments</th>" +  // machine_comments
 							"<th>available</th>" +
 							"<th>permitted</th>" +
 							"<th>lessee</th>" +
@@ -111,6 +112,7 @@ limitations under the License.
 							"<th>password</th>" +
 							"<th>admin</th>" +
 							"<th>password</th>" +
+							"<th>comments</th>" + // remote_access_comments
 						"</tr>";
 					for (var i=0; i<deviceList.length; i++) {
 						var device = deviceList[i];
@@ -140,6 +142,11 @@ limitations under the License.
 							owner = device['owner'];
 						}
 
+						var machine_comments = ".";
+						if (undefined != device['machine_comments']) {
+							machine_comments = device['machine_comments'];
+						}
+
 						newHtml += 
 							"<tr>" + 
 								"<td>" + device['name'] + "</td>" + 
@@ -149,6 +156,7 @@ limitations under the License.
 								"<td>" + device['bits'] + "</td>" + 
 								"<td>" + contents + "</td>" + 
 								"<td>" + owner + "</td>" +
+								"<td>" + machine_comments + "</td>" +
 								"<td>" + device['available'] + "</td>" +
 								"<td>" + permittedusers + "</td>";
 
@@ -168,8 +176,14 @@ limitations under the License.
 								"<td><button onclick=\"leaseDeviceByName('" + device['name'] + "')\">Lease</button></td>";
 						}
 						else if (username == device['lessor']) {
-							newHtml += 
-								"<td><button onclick=\"unleaseDeviceByName('" + device['name'] + "')\">Unlease</button></td>";
+							newHtml += "<td>" + 
+								"<button onclick=\"unleaseDeviceByName('" + device['name'] + "')\">Unlease</button>" +
+								"<button onclick=\"stopUnleaseVM('" + device['name'] + "')\">Stop<br>Unlease</button>";
+								if ('vlaunch' != device['hypervisor']) {
+									newHtml += 
+									"<button onclick=\"stopRestoreUnleaseVM('" + device['name'] + "')\">Stop<br>Restore<br>Unlease</button>";
+								}
+							newHtml += "</td>";
 						}
 						else {
 							newHtml += "<td>.</td>";
@@ -236,13 +250,18 @@ limitations under the License.
 							newHtml += "<td>.</td>";
 						}
 
+						var remote_access_comments = ".";
+						if (undefined != device['remote_access_comments']) {
+							remote_access_comments = device['remote_access_comments'];
+						}
 
 						// Remote access: users & passwords (the server-side filters these values).
 						newHtml +=
 								"<td>" + device['username'] + "</td>" + 
 								"<td>" + device['password'] + "</td>" + 
 								"<td>" + device['adminname'] + "</td>" + 
-								"<td>" + device['adminpswd'] + "</td>";
+								"<td>" + device['adminpswd'] + "</td>" +
+								"<td>" + remote_access_comments + "</td>";
 
 						newHtml += "</tr>";
 					}
@@ -474,6 +493,60 @@ limitations under the License.
 			};
 
 
+			// Button handler: Stop and unlease a virtual machine.
+			var stopUnleaseVM = function(deviceName) {
+				console.log("stopUnleaseVM: Entry. deviceName=" + deviceName + " username=" + username);
+
+				if (deviceName == undefined || 2 > deviceName.length) {
+					var msg = "stopUnleaseVM: User error:  deviceName is not valid. deviceName=" + deviceName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (username == undefined || 2 > username.length) {
+					var msg = "stopUnleaseVM: User error:  username is not valid. username=" + username;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var url = "stopUnleaseVM";
+
+				var queryparms = { "name" : deviceName, "lessor" : username };
+
+				postRequest(url, queryparms, controlVMCallback);
+
+				console.log("stopUnleaseVM: Exit.");
+			};
+
+
+			// Button handler: Stop, restore, and unlease a virtual machine.
+			var stopRestoreUnleaseVM = function(deviceName) {
+				console.log("stopRestoreUnleaseVM: Entry. deviceName=" + deviceName + " username=" + username);
+
+				if (deviceName == undefined || 2 > deviceName.length) {
+					var msg = "stopRestoreUnleaseVM: User error:  deviceName is not valid. deviceName=" + deviceName;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+				if (username == undefined || 2 > username.length) {
+					var msg = "stopRestoreUnleaseVM: User error:  username is not valid. username=" + username;
+					console.log(msg);
+					alert(msg);
+					return;
+				}
+
+				var url = "stopRestoreUnleaseVM";
+
+				var queryparms = { "name" : deviceName, "lessor" : username };
+
+				postRequest(url, queryparms, controlVMCallback);
+
+				console.log("stopRestoreUnleaseVM: Exit.");
+			};
+
+
 			// Callback function used by restoreVM, startVM, and stopVM via controlVM().
 			var controlVMCallback = function(responseString, textStatus, jqXHR) {
 				console.log("controlVMCallback. Entry.");
@@ -491,6 +564,10 @@ limitations under the License.
 
 				var response = JSON.parse(responseString);
 				var name = response['name'];
+				// Accept either keyword: name or device.
+				if (name == undefined) {
+					name = response['device'];
+				}
 				var action = response['action'];
 				var msg = response['msg'];
 				var rc = response['rc'];
