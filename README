@@ -1,9 +1,17 @@
-*** Under Construction ***
+Test Machine Control Application (TMCA)
 
-Code delivery is incomplete. Please stand by. Will finish soon...
+TMCA is a node.js application.  It is intended for use in an environment where:
+- Virtual Machines exist and are shared between users for transient use (where transient means a few hours to a few days).
+- Manually-created clean snapshots are available (and maintained) for users to restore/revert at the beginning of each use.
 
+TMCA provides two main functions to its consumers:
+- The ability for a user to 'lease' a VM and indicate to other users that the VM is busy.  This concept is not available in any of today's Virtual Machine hypervisors.
+- The ability to control a few simple operations on the VM (such as restoring a clean snapshot, starting the VM, stopping the VM).
 
+TMCA supports several types of Virtual Machine Hypervisors, including VMWare, VirtualBox, and OpenStack.  TMCA presents a common user-interface to its consumers, and hides the unique differences between hypervisors.
 
+Under the covers, the TMCA front end presents a web interface and REST interface to its consumers.  The web interface is intended for use by humans.  The REST interface is intended for test automation robots.  On the back end, TMCA communicates with and controls several types of Virtual Machine hypervisors (such as VMWare, VirtualBox, OpenStack, etc) using those hypervisors' command sets and/or client utilities to control their operations.
 
+History:  TMCA had its origins in a 2012 sandbox project to control VMs under VirtualBox.  It has been in use in a 'departmental production' role since 2013.  New feature enhancements and support for new hypervisors have been added steadily over the years.  
 
-
+Caveat:  TMCA is tool-grade software.  It's not pretty, but it is understandable and works really well.  We hope you find it useful.
